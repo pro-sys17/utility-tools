@@ -1,8 +1,26 @@
-"use client";
+export interface ExtractedTextItem {
+  id: string;
+  text: string;
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  heightPct: number;
+  fontSize: number;
+  fontName?: string;
+}
 
 export interface PdfPageProxy {
   getViewport: (options: { scale: number }) => { width: number; height: number };
   render: (options: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> };
+  getTextContent: () => Promise<{
+    items: Array<{
+      str?: string;
+      transform?: number[];
+      width?: number;
+      height?: number;
+      fontName?: string;
+    }>;
+  }>;
 }
 
 export interface PdfDocumentProxy {
@@ -95,3 +113,99 @@ export async function convertPdfPageToImage(
     );
   });
 }
+
+/**
+ * Extract all text items from a PDF page with normalized relative coordinates (0-1),
+ * line-grouping, and font metrics to allow interactive in-place text editing.
+ */
+export async function extractPageTextItems(
+  pdfDoc: PdfDocumentProxy,
+  pageNumber: number
+): Promise<ExtractedTextItem[]> {
+  const page = await pdfDoc.getPage(pageNumber);
+  const viewport = page.getViewport({ scale: 1.0 });
+  const textContent = await page.getTextContent();
+
+  const pageWidth = viewport.width;
+  const pageHeight = viewport.height;
+
+  interface RawItem {
+    str: string;
+    tx: number;
+    ty: number;
+    width: number;
+    height: number;
+    fontSize: number;
+    fontName?: string;
+  }
+
+  const rawItems: RawItem[] = [];
+
+  for (const item of textContent.items) {
+    if (!item || typeof item.str !== "string" || !item.str.trim()) continue;
+    if (!item.transform || !Array.isArray(item.transform)) continue;
+
+    const tx = item.transform[4];
+    const ty = item.transform[5];
+    const fontSize = Math.round(
+      Math.abs(item.transform[3]) || Math.abs(item.transform[0]) || 12
+    );
+    const width = item.width || fontSize * item.str.length * 0.6;
+    const height = item.height || fontSize;
+
+    rawItems.push({
+      str: item.str,
+      tx,
+      ty,
+      width,
+      height,
+      fontSize,
+      fontName: item.fontName,
+    });
+  }
+
+  // Sort top-to-bottom, left-to-right
+  rawItems.sort((a, b) => {
+    const yDiff = b.ty - a.ty;
+    if (Math.abs(yDiff) > 3) {
+      return yDiff;
+    }
+    return a.tx - b.tx;
+  });
+
+  const grouped: RawItem[] = [];
+  for (const item of rawItems) {
+    const prev = grouped[grouped.length - 1];
+    if (
+      prev &&
+      Math.abs(prev.ty - item.ty) < 3.5 &&
+      item.tx >= prev.tx &&
+      item.tx - (prev.tx + prev.width) < item.fontSize * 1.5
+    ) {
+      const needsSpace =
+        !prev.str.endsWith(" ") && !item.str.startsWith(" ") && item.tx > prev.tx + prev.width + 1;
+      prev.str += (needsSpace ? " " : "") + item.str;
+      prev.width = item.tx + item.width - prev.tx;
+      prev.fontSize = Math.max(prev.fontSize, item.fontSize);
+    } else {
+      grouped.push({ ...item });
+    }
+  }
+
+  return grouped.map((item, idx) => {
+    const top = pageHeight - item.ty - item.fontSize;
+    const left = item.tx;
+
+    return {
+      id: `text_${pageNumber}_${idx}`,
+      text: item.str.trim(),
+      xPct: Math.max(0, Math.min(1, left / pageWidth)),
+      yPct: Math.max(0, Math.min(1, top / pageHeight)),
+      widthPct: Math.max(0.01, Math.min(1, item.width / pageWidth)),
+      heightPct: Math.max(0.01, Math.min(1, (item.fontSize * 1.3) / pageHeight)),
+      fontSize: item.fontSize,
+      fontName: item.fontName,
+    };
+  });
+}
+

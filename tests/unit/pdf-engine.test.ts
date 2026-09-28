@@ -115,6 +115,43 @@ describe("pdf-engine", () => {
       expect(page1.getRotation().angle).toBe(90);
     });
 
+    it("applies in-place text replacements by concealing old text and rendering new text", async () => {
+      const doc = await PDFDocument.create();
+      doc.addPage([500, 700]);
+      const initialBytes = await doc.save();
+
+      const edits: Record<number, PageEditState> = {
+        0: {
+          pageIndex: 0,
+          rotationOffset: 0,
+          isDeleted: false,
+          texts: [],
+          drawings: [],
+          rectangles: [],
+          replacements: [
+            {
+              id: "rep1",
+              originalText: "Old Invoice Total: $100",
+              newText: "New Invoice Total: $250",
+              xPct: 0.1,
+              yPct: 0.2,
+              widthPct: 0.4,
+              heightPct: 0.05,
+              fontSize: 16,
+              color: "#000000",
+              backgroundColor: "#ffffff",
+            },
+          ],
+        },
+      };
+
+      const editedBytes = await applyPdfEdits(initialBytes.buffer as ArrayBuffer, edits);
+      expect(editedBytes.length).toBeGreaterThan(0);
+
+      const modifiedDoc = await PDFDocument.load(editedBytes);
+      expect(modifiedDoc.getPageCount()).toBe(1);
+    });
+
     it("throws an error when trying to delete all pages", async () => {
       const doc = await PDFDocument.create();
       doc.addPage([500, 700]);

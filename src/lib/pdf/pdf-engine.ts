@@ -260,6 +260,19 @@ export interface RectangleAnnotation {
   opacity: number;
 }
 
+export interface TextReplacement {
+  id: string;
+  originalText: string;
+  newText: string;
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  heightPct: number;
+  fontSize: number;
+  color: string;
+  backgroundColor: string;
+}
+
 export interface PageEditState {
   pageIndex: number;
   rotationOffset: number;
@@ -267,6 +280,7 @@ export interface PageEditState {
   texts: TextAnnotation[];
   drawings: DrawingStroke[];
   rectangles: RectangleAnnotation[];
+  replacements?: TextReplacement[];
 }
 
 export function parseHexColor(hex: string): { r: number; g: number; b: number } {
@@ -317,7 +331,43 @@ export async function applyPdfEdits(
       page.setRotation(degrees((currentRot + edit.rotationOffset) % 360));
     }
 
-    // 2. Rectangles / Highlights / Redactions
+    // 2. Text Replacements (Whiteout original & render replacement)
+    if (edit.replacements) {
+      for (const rep of edit.replacements) {
+        if (!rep.newText && !rep.originalText) continue;
+
+        const bg = parseHexColor(rep.backgroundColor || "#ffffff");
+        const x = rep.xPct * pageWidth;
+        const y = pageHeight - (rep.yPct * pageHeight) - (rep.heightPct * pageHeight);
+        const width = rep.widthPct * pageWidth;
+        const height = rep.heightPct * pageHeight;
+
+        // Opaque background to conceal original text
+        page.drawRectangle({
+          x: Math.max(0, x - 1),
+          y: Math.max(0, y - 1),
+          width: Math.min(pageWidth, width + 3),
+          height: Math.min(pageHeight, height + 3),
+          color: rgb(bg.r, bg.g, bg.b),
+          opacity: 1.0,
+        });
+
+        // Draw new replacement text
+        if (rep.newText.trim()) {
+          const fg = parseHexColor(rep.color || "#000000");
+          const textY = pageHeight - (rep.yPct * pageHeight) - rep.fontSize;
+          page.drawText(rep.newText, {
+            x: Math.max(0, x),
+            y: Math.max(0, textY),
+            size: rep.fontSize,
+            font,
+            color: rgb(fg.r, fg.g, fg.b),
+          });
+        }
+      }
+    }
+
+    // 3. Rectangles / Highlights / Redactions
     for (const rect of edit.rectangles) {
       const c = parseHexColor(rect.color);
       const x = rect.xPct * pageWidth;

@@ -8,6 +8,7 @@ import {
   applyPdfEdits,
   PageEditState,
   TextAnnotation,
+  TextReplacement,
   DrawingStroke,
   RectangleAnnotation,
   getPdfInfo,
@@ -15,10 +16,13 @@ import {
 import {
   loadPdfDocument,
   renderPdfPageToCanvas,
+  extractPageTextItems,
+  ExtractedTextItem,
   PdfDocumentProxy,
 } from "@/lib/pdf/pdf-render";
 import { downloadBlob } from "@/lib/file/download-utils";
 import {
+  FileEdit,
   Type,
   PenTool,
   Highlighter,
@@ -37,9 +41,12 @@ import {
   Eraser,
   Loader2,
   CheckCircle2,
+  Sparkles,
+  X,
+  Edit3,
 } from "lucide-react";
 
-type EditorMode = "text" | "draw" | "highlight" | "redact";
+type EditorMode = "editText" | "text" | "draw" | "highlight" | "redact";
 
 const PRESET_COLORS = [
   { label: "Black", value: "#000000" },
@@ -69,7 +76,7 @@ export function PdfEditorTool() {
   const [error, setError] = React.useState<string | null>(null);
 
   // Editor modes and tool states
-  const [mode, setMode] = React.useState<EditorMode>("text");
+  const [mode, setMode] = React.useState<EditorMode>("editText");
   const [textColor, setTextColor] = React.useState("#000000");
   const [fontSize, setFontSize] = React.useState(16);
   const [textInput, setTextInput] = React.useState("Approved");
@@ -79,6 +86,15 @@ export function PdfEditorTool() {
 
   // Per-page edits mapping: 0-indexed page indices
   const [edits, setEdits] = React.useState<Record<number, PageEditState>>({});
+
+  // Extracted text items for "Edit Existing Text" mode
+  const [extractedTexts, setExtractedTexts] = React.useState<ExtractedTextItem[]>([]);
+  const [isExtractingText, setIsExtractingText] = React.useState(false);
+  const [activeEditingText, setActiveEditingText] = React.useState<ExtractedTextItem | null>(null);
+  const [editTextValue, setEditTextValue] = React.useState("");
+  const [editTextColor, setEditTextColor] = React.useState("#000000");
+  const [editTextFontSize, setEditTextFontSize] = React.useState(14);
+  const [editTextBgColor, setEditTextBgColor] = React.useState("#ffffff");
 
   // Canvas refs
   const baseCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -100,6 +116,7 @@ export function PdfEditorTool() {
         texts: [],
         drawings: [],
         rectangles: [],
+        replacements: [],
       }
     );
   }, [edits, pageIndex]);
@@ -130,7 +147,37 @@ export function PdfEditorTool() {
     }
   };
 
-  // 2. Redraw Overlay Canvas with annotations
+  // 2. Extract existing text elements when page changes
+  React.useEffect(() => {
+    let isMounted = true;
+
+    if (!pdfDoc || currentPage < 1 || currentPage > totalPages) {
+      return;
+    }
+
+    Promise.resolve().then(() => {
+      if (!isMounted) return;
+      setIsExtractingText(true);
+      return extractPageTextItems(pdfDoc, currentPage);
+    }).then((items) => {
+      if (isMounted && items) {
+        setExtractedTexts(items);
+        setIsExtractingText(false);
+      }
+    }).catch((err) => {
+      console.error("Failed to extract page texts:", err);
+      if (isMounted) {
+        setExtractedTexts([]);
+        setIsExtractingText(false);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [pdfDoc, currentPage, totalPages]);
+
+  // 3. Redraw Overlay Canvas with annotations and text replacements
   const redrawOverlay = React.useCallback(() => {
     const overlay = overlayCanvasRef.current;
     if (!overlay) return;
@@ -141,6 +188,31 @@ export function PdfEditorTool() {
     const height = overlay.height;
 
     ctx.clearRect(0, 0, width, height);
+
+    // Draw text replacements (Whiteout box + new text replacement)
+    if (currentEdit.replacements) {
+      for (const rep of currentEdit.replacements) {
+        ctx.save();
+        // 1. Whiteout / conceal original text
+        ctx.fillStyle = rep.backgroundColor || "#ffffff";
+        ctx.fillRect(
+          Math.max(0, rep.xPct * width - 1),
+          Math.max(0, rep.yPct * height - 1),
+          Math.min(width, rep.widthPct * width + 2),
+          Math.min(height, rep.heightPct * height + 2)
+        );
+
+        // 2. Render replacement text
+        if (rep.newText.trim()) {
+          ctx.fillStyle = rep.color || "#000000";
+          const scaledFontSize = Math.max(10, Math.round(rep.fontSize * (scale / 1.0)));
+          ctx.font = `600 ${scaledFontSize}px Helvetica, Arial, sans-serif`;
+          ctx.textBaseline = "top";
+          ctx.fillText(rep.newText, rep.xPct * width, rep.yPct * height);
+        }
+        ctx.restore();
+      }
+    }
 
     // Draw saved rectangles
     for (const rect of currentEdit.rectangles) {
@@ -220,7 +292,6 @@ export function PdfEditorTool() {
     for (const textItem of currentEdit.texts) {
       ctx.save();
       ctx.fillStyle = textItem.color;
-      // Adjust preview font size for scale factor (rendered at scale 1.4)
       const scaledFontSize = Math.max(10, Math.round(textItem.fontSize * (scale / 1.0)));
       ctx.font = `600 ${scaledFontSize}px Helvetica, Arial, sans-serif`;
       ctx.textBaseline = "top";
@@ -229,7 +300,7 @@ export function PdfEditorTool() {
     }
   }, [currentEdit, mode, highlightColor, penColor, penWidth, scale]);
 
-  // 3. Render Base PDF Page on Canvas
+  // 4. Render Base PDF Page on Canvas
   React.useEffect(() => {
     if (!pdfDoc || !baseCanvasRef.current || currentPage < 1 || currentPage > totalPages) return;
 
@@ -266,7 +337,7 @@ export function PdfEditorTool() {
     redrawOverlay();
   }, [redrawOverlay]);
 
-  // 4. Update Edit State Helper
+  // 5. Update Edit State Helper
   const updateCurrentPageEdit = (updater: (prev: PageEditState) => PageEditState) => {
     setEdits((prev) => {
       const existing = prev[pageIndex] || {
@@ -276,6 +347,7 @@ export function PdfEditorTool() {
         texts: [],
         drawings: [],
         rectangles: [],
+        replacements: [],
       };
       return {
         ...prev,
@@ -285,7 +357,7 @@ export function PdfEditorTool() {
     setExportSuccess(false);
   };
 
-  // 5. Canvas Pointer Interactions
+  // 6. Canvas Pointer Interactions (for draw, highlight, redact, stamp text)
   const getCanvasCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return { xPct: 0, yPct: 0 };
@@ -299,7 +371,7 @@ export function PdfEditorTool() {
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (currentEdit.isDeleted) return;
+    if (currentEdit.isDeleted || mode === "editText") return;
     const coords = getCanvasCoords(e);
     isPointerDownRef.current = true;
 
@@ -335,7 +407,7 @@ export function PdfEditorTool() {
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isPointerDownRef.current || currentEdit.isDeleted) return;
+    if (!isPointerDownRef.current || currentEdit.isDeleted || mode === "editText") return;
     const coords = getCanvasCoords(e);
 
     if (mode === "draw") {
@@ -351,7 +423,7 @@ export function PdfEditorTool() {
   };
 
   const handlePointerUp = () => {
-    if (!isPointerDownRef.current) return;
+    if (!isPointerDownRef.current || mode === "editText") return;
     isPointerDownRef.current = false;
 
     if (mode === "draw" && activeStrokeRef.current.length > 1) {
@@ -381,7 +453,6 @@ export function PdfEditorTool() {
       const widthPct = Math.abs(cur.xPct - start.xPct);
       const heightPct = Math.abs(cur.yPct - start.yPct);
 
-      // Only add if dragging covered at least 0.5% of dimension
       if (widthPct > 0.005 && heightPct > 0.005) {
         const isRedact = mode === "redact";
         const newRect: RectangleAnnotation = {
@@ -405,7 +476,70 @@ export function PdfEditorTool() {
     }
   };
 
-  // 6. Rotate Page (+90 deg)
+  // 7. Interactive Existing Text Editing handlers
+  const handleStartEditText = (item: ExtractedTextItem) => {
+    // Check if there is an existing replacement for this item
+    const existingReplacement = currentEdit.replacements?.find(
+      (r) => r.id === item.id || (Math.abs(r.xPct - item.xPct) < 0.01 && Math.abs(r.yPct - item.yPct) < 0.01)
+    );
+
+    setActiveEditingText(item);
+    setEditTextValue(existingReplacement ? existingReplacement.newText : item.text);
+    setEditTextColor(existingReplacement ? existingReplacement.color : "#000000");
+    setEditTextFontSize(existingReplacement ? existingReplacement.fontSize : Math.max(12, item.fontSize));
+    setEditTextBgColor(existingReplacement ? existingReplacement.backgroundColor : "#ffffff");
+  };
+
+  const handleSaveTextReplacement = () => {
+    if (!activeEditingText) return;
+
+    const rep: TextReplacement = {
+      id: activeEditingText.id,
+      originalText: activeEditingText.text,
+      newText: editTextValue,
+      xPct: activeEditingText.xPct,
+      yPct: activeEditingText.yPct,
+      widthPct: activeEditingText.widthPct,
+      heightPct: activeEditingText.heightPct,
+      fontSize: editTextFontSize,
+      color: editTextColor,
+      backgroundColor: editTextBgColor,
+    };
+
+    updateCurrentPageEdit((prev) => {
+      const filtered = (prev.replacements || []).filter(
+        (r) => r.id !== rep.id && !(Math.abs(r.xPct - rep.xPct) < 0.01 && Math.abs(r.yPct - rep.yPct) < 0.01)
+      );
+      return {
+        ...prev,
+        replacements: [...filtered, rep],
+      };
+    });
+
+    setActiveEditingText(null);
+  };
+
+  const handleRevertActiveText = () => {
+    if (!activeEditingText) return;
+
+    updateCurrentPageEdit((prev) => ({
+      ...prev,
+      replacements: (prev.replacements || []).filter(
+        (r) => r.id !== activeEditingText.id && !(Math.abs(r.xPct - activeEditingText.xPct) < 0.01 && Math.abs(r.yPct - activeEditingText.yPct) < 0.01)
+      ),
+    }));
+
+    setActiveEditingText(null);
+  };
+
+  const handleDeleteReplacement = (id: string) => {
+    updateCurrentPageEdit((prev) => ({
+      ...prev,
+      replacements: (prev.replacements || []).filter((r) => r.id !== id),
+    }));
+  };
+
+  // 8. Rotate Page (+90 deg)
   const handleRotatePage = () => {
     updateCurrentPageEdit((prev) => ({
       ...prev,
@@ -413,9 +547,8 @@ export function PdfEditorTool() {
     }));
   };
 
-  // 7. Toggle Page Deletion
+  // 9. Toggle Page Deletion
   const handleToggleDeletePage = () => {
-    // Check if other non-deleted pages exist
     if (!currentEdit.isDeleted) {
       let nonDeletedCount = 0;
       for (let i = 0; i < totalPages; i++) {
@@ -436,9 +569,12 @@ export function PdfEditorTool() {
     }));
   };
 
-  // 8. Undo Last Action on Current Page
+  // 10. Undo Last Action on Current Page
   const handleUndo = () => {
     updateCurrentPageEdit((prev) => {
+      if ((prev.replacements?.length || 0) > 0 && mode === "editText") {
+        return { ...prev, replacements: prev.replacements?.slice(0, -1) };
+      }
       if (prev.texts.length > 0 && mode === "text") {
         return { ...prev, texts: prev.texts.slice(0, -1) };
       }
@@ -448,7 +584,9 @@ export function PdfEditorTool() {
       if (prev.rectangles.length > 0 && (mode === "highlight" || mode === "redact")) {
         return { ...prev, rectangles: prev.rectangles.slice(0, -1) };
       }
-      // General fallback: pop from whichever has latest
+      if ((prev.replacements?.length || 0) > 0) {
+        return { ...prev, replacements: prev.replacements?.slice(0, -1) };
+      }
       if (prev.texts.length > 0) {
         return { ...prev, texts: prev.texts.slice(0, -1) };
       }
@@ -462,17 +600,17 @@ export function PdfEditorTool() {
     });
   };
 
-  // 9. Clear All Annotations on Current Page
+  // 11. Clear All Annotations and Replacements on Current Page
   const handleClearPage = () => {
     updateCurrentPageEdit((prev) => ({
       ...prev,
       texts: [],
       drawings: [],
       rectangles: [],
+      replacements: [],
     }));
   };
 
-  // 10. Delete Individual Annotation
   const handleDeleteText = (id: string) => {
     updateCurrentPageEdit((prev) => ({
       ...prev,
@@ -494,7 +632,7 @@ export function PdfEditorTool() {
     }));
   };
 
-  // 11. Export & Download Modified PDF
+  // 12. Export & Download Modified PDF
   const handleExport = async () => {
     if (!fileBuffer || !file) return;
     setIsExporting(true);
@@ -522,12 +660,26 @@ export function PdfEditorTool() {
     setTotalPages(0);
     setCurrentPage(1);
     setEdits({});
+    setExtractedTexts([]);
+    setActiveEditingText(null);
     setError(null);
     setExportSuccess(false);
   };
 
   const totalAnnotationsOnPage =
-    currentEdit.texts.length + currentEdit.drawings.length + currentEdit.rectangles.length;
+    currentEdit.texts.length +
+    currentEdit.drawings.length +
+    currentEdit.rectangles.length +
+    (currentEdit.replacements?.length || 0);
+
+  const hasExistingReplacement = activeEditingText
+    ? (currentEdit.replacements || []).some(
+        (r) =>
+          r.id === activeEditingText.id ||
+          (Math.abs(r.xPct - activeEditingText.xPct) < 0.01 &&
+            Math.abs(r.yPct - activeEditingText.yPct) < 0.01)
+      )
+    : false;
 
   return (
     <div className="space-y-6">
@@ -545,7 +697,7 @@ export function PdfEditorTool() {
             acceptedTypes={["application/pdf"]}
             multiple={false}
             title="Select a PDF to Edit"
-            subtitle="Add text, signatures, highlights, redactions, and rotate pages locally in your browser"
+            subtitle="Edit existing text in-place, add text, draw signatures, highlight, redact, and rotate pages locally"
           />
         )
       ) : (
@@ -597,7 +749,7 @@ export function PdfEditorTool() {
             <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-50 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900 text-sm">
               <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
               <span>
-                Your edited PDF document has been downloaded successfully with all modifications burned in!
+                Your edited PDF document has been downloaded successfully with all text edits and modifications burned in!
               </span>
             </div>
           )}
@@ -618,6 +770,20 @@ export function PdfEditorTool() {
               <div className="flex items-center space-x-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
                 <button
                   type="button"
+                  onClick={() => setMode("editText")}
+                  className={`flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                    mode === "editText"
+                      ? "bg-blue-600 text-white shadow-sm"
+                      : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100"
+                  }`}
+                  title="Click on any existing text on the PDF to edit or replace it"
+                >
+                  <FileEdit className="h-3.5 w-3.5" />
+                  <span>Edit Existing Text</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setMode("text")}
                   className={`flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
                     mode === "text"
@@ -626,7 +792,7 @@ export function PdfEditorTool() {
                   }`}
                 >
                   <Type className="h-3.5 w-3.5" />
-                  <span>Text</span>
+                  <span>Add Text</span>
                 </button>
 
                 <button
@@ -730,7 +896,7 @@ export function PdfEditorTool() {
                   variant="ghost"
                   size="sm"
                   onClick={handleUndo}
-                  title="Undo last annotation"
+                  title="Undo last modification"
                   disabled={totalAnnotationsOnPage === 0}
                 >
                   <Undo2 className="h-4 w-4" />
@@ -740,7 +906,7 @@ export function PdfEditorTool() {
                   variant="ghost"
                   size="sm"
                   onClick={handleClearPage}
-                  title="Clear all annotations on current page"
+                  title="Clear all modifications on current page"
                   disabled={totalAnnotationsOnPage === 0}
                 >
                   <Eraser className="h-4 w-4 text-red-500" />
@@ -775,10 +941,37 @@ export function PdfEditorTool() {
 
             {/* Sub-tool Configuration Panel */}
             <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center gap-4 text-xs">
+              {mode === "editText" && (
+                <div className="flex flex-wrap items-center justify-between w-full gap-2">
+                  <div className="flex items-center space-x-2">
+                    <span className="font-semibold text-blue-600 dark:text-blue-400 flex items-center space-x-1">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      <span>Click on any existing text element below to edit it in-place.</span>
+                    </span>
+                    {isExtractingText ? (
+                      <span className="text-slate-400 flex items-center space-x-1 text-[11px]">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        <span>Detecting text elements...</span>
+                      </span>
+                    ) : (
+                      <span className="text-slate-500 dark:text-slate-400 text-[11px]">
+                        ({extractedTexts.length} text elements detected on page {currentPage})
+                      </span>
+                    )}
+                  </div>
+
+                  {(currentEdit.replacements?.length || 0) > 0 && (
+                    <span className="text-emerald-700 dark:text-emerald-300 font-medium text-[11px] bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">
+                      {currentEdit.replacements?.length} text {currentEdit.replacements?.length === 1 ? "replacement" : "replacements"} active
+                    </span>
+                  )}
+                </div>
+              )}
+
               {mode === "text" && (
                 <>
                   <div className="flex items-center space-x-2">
-                    <span className="text-slate-500">Text:</span>
+                    <span className="text-slate-500">Stamp Text:</span>
                     <input
                       type="text"
                       value={textInput}
@@ -972,6 +1165,8 @@ export function PdfEditorTool() {
                         className={`absolute inset-0 z-10 ${
                           currentEdit.isDeleted
                             ? "cursor-not-allowed"
+                            : mode === "editText"
+                            ? "pointer-events-none"
                             : mode === "text"
                             ? "cursor-crosshair"
                             : mode === "draw"
@@ -980,6 +1175,46 @@ export function PdfEditorTool() {
                         }`}
                         style={{ touchAction: "none" }}
                       />
+
+                      {/* Interactive Text Element Overlay (For "Edit Existing Text" mode) */}
+                      {mode === "editText" && !currentEdit.isDeleted && (
+                        <div className="absolute inset-0 z-20 pointer-events-none">
+                          {extractedTexts.map((item) => {
+                            const isReplaced = (currentEdit.replacements || []).some(
+                              (r) =>
+                                r.id === item.id ||
+                                (Math.abs(r.xPct - item.xPct) < 0.01 &&
+                                  Math.abs(r.yPct - item.yPct) < 0.01)
+                            );
+
+                            return (
+                              <button
+                                key={item.id}
+                                type="button"
+                                onClick={() => handleStartEditText(item)}
+                                title={`Click to edit: "${item.text}"`}
+                                style={{
+                                  left: `${item.xPct * 100}%`,
+                                  top: `${item.yPct * 100}%`,
+                                  width: `${item.widthPct * 100}%`,
+                                  height: `${item.heightPct * 100}%`,
+                                }}
+                                className={`absolute pointer-events-auto transition-all text-left flex items-center group ${
+                                  isReplaced
+                                    ? "border-2 border-emerald-500 bg-emerald-500/10 hover:bg-emerald-500/20"
+                                    : "border border-blue-400/40 hover:border-blue-600 hover:bg-blue-500/15"
+                                } rounded cursor-pointer`}
+                              >
+                                {isReplaced && (
+                                  <span className="absolute -top-3.5 right-0 text-[9px] bg-emerald-600 text-white font-bold px-1 rounded shadow-xs">
+                                    Edited
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </CardContent>
@@ -1006,6 +1241,7 @@ export function PdfEditorTool() {
                         (pEdit.texts.length > 0 ||
                           pEdit.drawings.length > 0 ||
                           pEdit.rectangles.length > 0 ||
+                          (pEdit.replacements?.length || 0) > 0 ||
                           pEdit.rotationOffset > 0);
 
                       return (
@@ -1033,7 +1269,7 @@ export function PdfEditorTool() {
                 </CardContent>
               </Card>
 
-              {/* Current Page Layers / Annotations */}
+              {/* Current Page Modifications & Layers */}
               <Card className="border border-slate-200 dark:border-slate-800">
                 <CardContent className="p-4 space-y-3">
                   <div className="flex items-center justify-between">
@@ -1053,11 +1289,60 @@ export function PdfEditorTool() {
 
                   {totalAnnotationsOnPage === 0 ? (
                     <p className="text-xs text-slate-500 dark:text-slate-400 italic py-2">
-                      No annotations placed on this page yet. Use the tools above to add text, signatures, or highlights.
+                      No edits or annotations placed on this page yet. Use the tools above to edit existing text, add notes, or draw.
                     </p>
                   ) : (
                     <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                      {/* Texts */}
+                      {/* Text Replacements */}
+                      {(currentEdit.replacements || []).map((rep) => (
+                        <div
+                          key={rep.id}
+                          className="flex items-center justify-between p-2 rounded bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 text-xs"
+                        >
+                          <div className="flex items-center space-x-2 truncate">
+                            <FileEdit className="h-3.5 w-3.5 text-blue-600 shrink-0" />
+                            <div className="truncate">
+                              <span className="line-through text-slate-400 mr-1 text-[11px]">
+                                {rep.originalText}
+                              </span>
+                              <span className="font-semibold text-blue-700 dark:text-blue-300">
+                                &rarr; &ldquo;{rep.newText}&rdquo;
+                              </span>
+                            </div>
+                          </div>
+                          <div className="flex items-center space-x-1 shrink-0 ml-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const found = extractedTexts.find((t) => t.id === rep.id) || {
+                                  id: rep.id,
+                                  text: rep.originalText,
+                                  xPct: rep.xPct,
+                                  yPct: rep.yPct,
+                                  widthPct: rep.widthPct,
+                                  heightPct: rep.heightPct,
+                                  fontSize: rep.fontSize,
+                                };
+                                handleStartEditText(found);
+                              }}
+                              className="text-blue-600 hover:text-blue-800 dark:hover:text-blue-300 p-0.5"
+                              title="Re-edit this text"
+                            >
+                              <Edit3 className="h-3 w-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteReplacement(rep.id)}
+                              className="text-slate-400 hover:text-red-500 p-0.5"
+                              title="Revert back to original text"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Stamped Texts */}
                       {currentEdit.texts.map((t) => (
                         <div
                           key={t.id}
@@ -1139,6 +1424,142 @@ export function PdfEditorTool() {
               </Card>
             </div>
           </div>
+
+          {/* Interactive Modal for Editing Existing PDF Text */}
+          {activeEditingText && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 max-w-lg w-full space-y-4">
+                <div className="flex items-center justify-between border-b pb-3 dark:border-slate-800">
+                  <div className="flex items-center space-x-2">
+                    <FileEdit className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                    <h3 className="font-semibold text-slate-900 dark:text-slate-100">
+                      Edit Existing PDF Text
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveEditingText(null)}
+                    className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider block mb-1">
+                      Original Text on PDF
+                    </label>
+                    <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs font-mono text-slate-700 dark:text-slate-300 select-all">
+                      &ldquo;{activeEditingText.text}&rdquo;
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider block mb-1">
+                      New Replacement Text
+                    </label>
+                    <textarea
+                      value={editTextValue}
+                      onChange={(e) => setEditTextValue(e.target.value)}
+                      rows={3}
+                      autoFocus
+                      className="w-full px-3 py-2 text-sm border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 font-sans"
+                      placeholder="Enter updated text..."
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 dark:text-slate-400 block mb-1">
+                        Font Size: {editTextFontSize}pt
+                      </label>
+                      <input
+                        type="range"
+                        min={8}
+                        max={36}
+                        value={editTextFontSize}
+                        onChange={(e) => setEditTextFontSize(Number(e.target.value))}
+                        className="w-full"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 dark:text-slate-400 block mb-1">
+                        Text Color
+                      </label>
+                      <div className="flex items-center space-x-1.5">
+                        {PRESET_COLORS.map((c) => (
+                          <button
+                            key={c.value}
+                            type="button"
+                            onClick={() => setEditTextColor(c.value)}
+                            className={`w-5 h-5 rounded-full border ${
+                              editTextColor === c.value
+                                ? "ring-2 ring-offset-1 ring-blue-500 scale-110"
+                                : "border-slate-300 dark:border-slate-600"
+                            }`}
+                            style={{ backgroundColor: c.value }}
+                            title={c.label}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center space-x-2 text-xs text-slate-500">
+                      <span>Conceal Background:</span>
+                      <input
+                        type="color"
+                        value={editTextBgColor}
+                        onChange={(e) => setEditTextBgColor(e.target.value)}
+                        className="w-6 h-6 rounded cursor-pointer border border-slate-300"
+                        title="Conceal background color (default #ffffff for white pages)"
+                      />
+                      <span className="text-[11px] font-mono">{editTextBgColor}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between border-t pt-3 dark:border-slate-800 gap-2">
+                  {hasExistingReplacement ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleRevertActiveText}
+                      className="text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 text-xs"
+                    >
+                      Revert to Original
+                    </Button>
+                  ) : (
+                    <div />
+                  )}
+
+                  <div className="flex items-center space-x-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setActiveEditingText(null)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="default"
+                      size="sm"
+                      onClick={handleSaveTextReplacement}
+                      className="bg-blue-600 hover:bg-blue-700 text-white font-medium"
+                    >
+                      Apply Replacement
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
