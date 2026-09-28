@@ -285,6 +285,59 @@ export function resolveStandardFont(
   return StandardFonts.Helvetica;
 }
 
+/**
+ * Sanitize Unicode text for PDF StandardFonts (WinAnsi encoding).
+ * Automatically converts currency symbols (e.g. ₹ -> Rs.), typographical punctuation,
+ * and replaces unencodable characters with safe fallbacks so export never crashes.
+ */
+export function sanitizeTextForFont(
+  text: string,
+  font?: { encodeText: (text: string) => unknown }
+): string {
+  if (!text) return "";
+
+  // 1. Common Unicode replacements & transliterations
+  const cleaned = text
+    .replace(/\u20B9/g, "Rs. ") // Indian Rupee (₹)
+    .replace(/\u20BD/g, "RUB ") // Russian Ruble (₽)
+    .replace(/\u20BA/g, "TRY ") // Turkish Lira (₺)
+    .replace(/\u20B4/g, "UAH ") // Ukrainian Hryvnia (₴)
+    .replace(/\u20BF/g, "BTC ") // Bitcoin (₿)
+    .replace(/\u20AB/g, "VND ") // Vietnamese Dong (₫)
+    .replace(/\u20A9/g, "KRW ") // Korean Won (₩)
+    .replace(/\u20AA/g, "ILS ") // Israeli Shekel (₪)
+    .replace(/\u20B5/g, "GHS ") // Ghanaian Cedi (₵)
+    .replace(/\u20B8/g, "KZT ") // Kazakhstani Tenge (₸)
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // Single quotes & apostrophes
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"') // Double quotes
+    .replace(/[\u2013\u2014\u2015]/g, "-") // En/em dashes
+    .replace(/\u2026/g, "...") // Ellipsis
+    .replace(/[\u2022\u25E6\u2023\u2043]/g, "*") // Bullets
+    .replace(/\u2032/g, "'") // Prime
+    .replace(/\u2033/g, '"') // Double prime
+    .replace(/\u2122/g, "(TM)") // Trademark
+    .replace(/\u2116/g, "No.") // Numero sign
+    .replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " "); // Spaces
+
+  if (!font || typeof font.encodeText !== "function") {
+    return cleaned;
+  }
+
+  // 2. Character-by-character encode validation against the specific embedded font
+  let result = "";
+  for (const char of cleaned) {
+    try {
+      font.encodeText(char);
+      result += char;
+    } catch {
+      // If a character cannot be encoded in WinAnsi, fallback to '?'
+      result += "?";
+    }
+  }
+
+  return result;
+}
+
 export interface TextReplacement {
   id: string;
   originalText: string;
@@ -402,8 +455,9 @@ export async function applyPdfEdits(
           const textY = pageHeight - (rep.yPct * pageHeight) - rep.fontSize;
           const targetFontEnum = resolveStandardFont(rep.fontFamily, rep.isBold, rep.isItalic);
           const matchedFont = await getFont(targetFontEnum);
+          const safeText = sanitizeTextForFont(rep.newText, matchedFont);
 
-          page.drawText(rep.newText, {
+          page.drawText(safeText, {
             x: Math.max(0, x),
             y: Math.max(0, textY),
             size: rep.fontSize,
@@ -462,8 +516,9 @@ export async function applyPdfEdits(
       const c = parseHexColor(textItem.color);
       const x = textItem.xPct * pageWidth;
       const y = pageHeight - (textItem.yPct * pageHeight) - textItem.fontSize;
+      const safeText = sanitizeTextForFont(textItem.text, defaultFont);
 
-      page.drawText(textItem.text, {
+      page.drawText(safeText, {
         x: Math.max(0, x),
         y: Math.max(0, y),
         size: textItem.fontSize,

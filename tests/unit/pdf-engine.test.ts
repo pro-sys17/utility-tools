@@ -5,11 +5,31 @@ import {
   applyPdfEdits,
   PageEditState,
   resolveStandardFont,
+  sanitizeTextForFont,
 } from "../../src/lib/pdf/pdf-engine";
 import { detectFontProperties } from "../../src/lib/pdf/pdf-render";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 
 describe("pdf-engine", () => {
+  describe("sanitizeTextForFont", () => {
+    it("converts Indian Rupee symbol (₹) to Rs. so WinAnsi doesn't fail", async () => {
+      const doc = await PDFDocument.create();
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      const text = "Total Due: ₹ 2,500.00";
+      const sanitized = sanitizeTextForFont(text, font);
+      expect(sanitized).toBe("Total Due: Rs.  2,500.00");
+      expect(() => font.encodeText(sanitized)).not.toThrow();
+    });
+
+    it("sanitizes smart quotes, em dashes, and ellipses", async () => {
+      const doc = await PDFDocument.create();
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      const text = "“Hello”—it’s 2026…";
+      const sanitized = sanitizeTextForFont(text, font);
+      expect(() => font.encodeText(sanitized)).not.toThrow();
+    });
+  });
+
   describe("parsePageRanges", () => {
     it("parses single page", () => {
       expect(parsePageRanges("3", 10)).toEqual([3]);
@@ -206,6 +226,41 @@ describe("pdf-engine", () => {
 
       const modifiedDoc = await PDFDocument.load(editedBytes);
       expect(modifiedDoc.getPageCount()).toBe(1);
+    });
+
+    it("successfully encodes Indian Rupee symbol (₹) in text replacements during export", async () => {
+      const doc = await PDFDocument.create();
+      doc.addPage([500, 700]);
+      const bytes = await doc.save();
+
+      const edits: Record<number, PageEditState> = {
+        0: {
+          pageIndex: 0,
+          rotationOffset: 0,
+          isDeleted: false,
+          texts: [],
+          drawings: [],
+          rectangles: [],
+          replacements: [
+            {
+              id: "rep-rupee",
+              originalText: "$100",
+              newText: "₹ 7,500.00",
+              xPct: 0.1,
+              yPct: 0.2,
+              widthPct: 0.3,
+              heightPct: 0.05,
+              fontSize: 16,
+              color: "#000000",
+              backgroundColor: "#ffffff",
+            },
+          ],
+        },
+      };
+
+      // This used to fail with: WinAnsi cannot encode "₹" (0x20b9)
+      const result = await applyPdfEdits(bytes, edits);
+      expect(result.length).toBeGreaterThan(0);
     });
 
     it("throws an error when trying to delete all pages", async () => {
