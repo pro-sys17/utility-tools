@@ -11,6 +11,7 @@ import {
   TextReplacement,
   DrawingStroke,
   RectangleAnnotation,
+  PdfFontFamily,
   getPdfInfo,
 } from "@/lib/pdf/pdf-engine";
 import {
@@ -44,6 +45,8 @@ import {
   Sparkles,
   X,
   Edit3,
+  Bold,
+  Italic,
 } from "lucide-react";
 
 type EditorMode = "editText" | "text" | "draw" | "highlight" | "redact";
@@ -91,10 +94,16 @@ export function PdfEditorTool() {
   const [extractedTexts, setExtractedTexts] = React.useState<ExtractedTextItem[]>([]);
   const [isExtractingText, setIsExtractingText] = React.useState(false);
   const [activeEditingText, setActiveEditingText] = React.useState<ExtractedTextItem | null>(null);
+
+  // Active in-place text edit form values
   const [editTextValue, setEditTextValue] = React.useState("");
   const [editTextColor, setEditTextColor] = React.useState("#000000");
   const [editTextFontSize, setEditTextFontSize] = React.useState(14);
   const [editTextBgColor, setEditTextBgColor] = React.useState("#ffffff");
+  const [editTextFontFamily, setEditTextFontFamily] = React.useState<PdfFontFamily>("helvetica");
+  const [editTextIsBold, setEditTextIsBold] = React.useState(false);
+  const [editTextIsItalic, setEditTextIsItalic] = React.useState(false);
+  const [editTextDetectedFontName, setEditTextDetectedFontName] = React.useState("");
 
   // Canvas refs
   const baseCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -120,6 +129,24 @@ export function PdfEditorTool() {
       }
     );
   }, [edits, pageIndex]);
+
+  // Compute dominant font for active page
+  const dominantFont = React.useMemo(() => {
+    if (extractedTexts.length === 0) return null;
+    const counts: Record<string, number> = {};
+    for (const item of extractedTexts) {
+      counts[item.detectedFontName] = (counts[item.detectedFontName] || 0) + 1;
+    }
+    let topName = "";
+    let topCount = 0;
+    for (const [name, count] of Object.entries(counts)) {
+      if (count > topCount) {
+        topCount = count;
+        topName = name;
+      }
+    }
+    return topName;
+  }, [extractedTexts]);
 
   // 1. Handle PDF file selection
   const handleFileSelect = async (files: File[]) => {
@@ -155,29 +182,32 @@ export function PdfEditorTool() {
       return;
     }
 
-    Promise.resolve().then(() => {
-      if (!isMounted) return;
-      setIsExtractingText(true);
-      return extractPageTextItems(pdfDoc, currentPage);
-    }).then((items) => {
-      if (isMounted && items) {
-        setExtractedTexts(items);
-        setIsExtractingText(false);
-      }
-    }).catch((err) => {
-      console.error("Failed to extract page texts:", err);
-      if (isMounted) {
-        setExtractedTexts([]);
-        setIsExtractingText(false);
-      }
-    });
+    Promise.resolve()
+      .then(() => {
+        if (!isMounted) return;
+        setIsExtractingText(true);
+        return extractPageTextItems(pdfDoc, currentPage);
+      })
+      .then((items) => {
+        if (isMounted && items) {
+          setExtractedTexts(items);
+          setIsExtractingText(false);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to extract page texts:", err);
+        if (isMounted) {
+          setExtractedTexts([]);
+          setIsExtractingText(false);
+        }
+      });
 
     return () => {
       isMounted = false;
     };
   }, [pdfDoc, currentPage, totalPages]);
 
-  // 3. Redraw Overlay Canvas with annotations and text replacements
+  // 3. Redraw Overlay Canvas with annotations, drawings, and font-matched text replacements
   const redrawOverlay = React.useCallback(() => {
     const overlay = overlayCanvasRef.current;
     if (!overlay) return;
@@ -189,7 +219,7 @@ export function PdfEditorTool() {
 
     ctx.clearRect(0, 0, width, height);
 
-    // Draw text replacements (Whiteout box + new text replacement)
+    // Draw text replacements (Whiteout box + new text replacement with matched font)
     if (currentEdit.replacements) {
       for (const rep of currentEdit.replacements) {
         ctx.save();
@@ -202,11 +232,20 @@ export function PdfEditorTool() {
           Math.min(height, rep.heightPct * height + 2)
         );
 
-        // 2. Render replacement text
+        // 2. Render replacement text using matched font family, weight, and style
         if (rep.newText.trim()) {
           ctx.fillStyle = rep.color || "#000000";
           const scaledFontSize = Math.max(10, Math.round(rep.fontSize * (scale / 1.0)));
-          ctx.font = `600 ${scaledFontSize}px Helvetica, Arial, sans-serif`;
+          const fontStyle = rep.isItalic ? "italic" : "normal";
+          const fontWeight = rep.isBold ? "bold" : "normal";
+          const fontFam =
+            rep.fontFamily === "times"
+              ? '"Times New Roman", Times, Georgia, serif'
+              : rep.fontFamily === "courier"
+              ? '"Courier New", Courier, monospace'
+              : 'Helvetica, Arial, -apple-system, sans-serif';
+
+          ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px ${fontFam}`;
           ctx.textBaseline = "top";
           ctx.fillText(rep.newText, rep.xPct * width, rep.yPct * height);
         }
@@ -288,7 +327,7 @@ export function PdfEditorTool() {
       ctx.restore();
     }
 
-    // Draw text annotations
+    // Draw stamped text annotations
     for (const textItem of currentEdit.texts) {
       ctx.save();
       ctx.fillStyle = textItem.color;
@@ -314,7 +353,6 @@ export function PdfEditorTool() {
 
         if (!isMounted) return;
 
-        // Size overlay canvas identically to base canvas
         const overlayCanvas = overlayCanvasRef.current;
         if (overlayCanvas) {
           overlayCanvas.width = dims.width;
@@ -478,16 +516,27 @@ export function PdfEditorTool() {
 
   // 7. Interactive Existing Text Editing handlers
   const handleStartEditText = (item: ExtractedTextItem) => {
-    // Check if there is an existing replacement for this item
     const existingReplacement = currentEdit.replacements?.find(
-      (r) => r.id === item.id || (Math.abs(r.xPct - item.xPct) < 0.01 && Math.abs(r.yPct - item.yPct) < 0.01)
+      (r) =>
+        r.id === item.id ||
+        (Math.abs(r.xPct - item.xPct) < 0.01 && Math.abs(r.yPct - item.yPct) < 0.01)
     );
 
     setActiveEditingText(item);
     setEditTextValue(existingReplacement ? existingReplacement.newText : item.text);
     setEditTextColor(existingReplacement ? existingReplacement.color : "#000000");
-    setEditTextFontSize(existingReplacement ? existingReplacement.fontSize : Math.max(12, item.fontSize));
+    setEditTextFontSize(
+      existingReplacement ? existingReplacement.fontSize : Math.max(10, item.fontSize)
+    );
     setEditTextBgColor(existingReplacement ? existingReplacement.backgroundColor : "#ffffff");
+    setEditTextFontFamily(existingReplacement?.fontFamily || item.fontFamily || "helvetica");
+    setEditTextIsBold(
+      existingReplacement !== undefined ? Boolean(existingReplacement.isBold) : item.isBold
+    );
+    setEditTextIsItalic(
+      existingReplacement !== undefined ? Boolean(existingReplacement.isItalic) : item.isItalic
+    );
+    setEditTextDetectedFontName(item.detectedFontName || "Standard Sans-serif");
   };
 
   const handleSaveTextReplacement = () => {
@@ -504,11 +553,17 @@ export function PdfEditorTool() {
       fontSize: editTextFontSize,
       color: editTextColor,
       backgroundColor: editTextBgColor,
+      fontFamily: editTextFontFamily,
+      isBold: editTextIsBold,
+      isItalic: editTextIsItalic,
+      detectedFontName: editTextDetectedFontName,
     };
 
     updateCurrentPageEdit((prev) => {
       const filtered = (prev.replacements || []).filter(
-        (r) => r.id !== rep.id && !(Math.abs(r.xPct - rep.xPct) < 0.01 && Math.abs(r.yPct - rep.yPct) < 0.01)
+        (r) =>
+          r.id !== rep.id &&
+          !(Math.abs(r.xPct - rep.xPct) < 0.01 && Math.abs(r.yPct - rep.yPct) < 0.01)
       );
       return {
         ...prev,
@@ -525,7 +580,12 @@ export function PdfEditorTool() {
     updateCurrentPageEdit((prev) => ({
       ...prev,
       replacements: (prev.replacements || []).filter(
-        (r) => r.id !== activeEditingText.id && !(Math.abs(r.xPct - activeEditingText.xPct) < 0.01 && Math.abs(r.yPct - activeEditingText.yPct) < 0.01)
+        (r) =>
+          r.id !== activeEditingText.id &&
+          !(
+            Math.abs(r.xPct - activeEditingText.xPct) < 0.01 &&
+            Math.abs(r.yPct - activeEditingText.yPct) < 0.01
+          )
       ),
     }));
 
@@ -697,7 +757,7 @@ export function PdfEditorTool() {
             acceptedTypes={["application/pdf"]}
             multiple={false}
             title="Select a PDF to Edit"
-            subtitle="Edit existing text in-place, add text, draw signatures, highlight, redact, and rotate pages locally"
+            subtitle="Auto-detect fonts, edit existing text in-place, add text, draw signatures, highlight, and redact"
           />
         )
       ) : (
@@ -749,7 +809,7 @@ export function PdfEditorTool() {
             <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-50 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900 text-sm">
               <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
               <span>
-                Your edited PDF document has been downloaded successfully with all text edits and modifications burned in!
+                Your edited PDF document has been downloaded successfully with all font-matched text edits burned in!
               </span>
             </div>
           )}
@@ -776,7 +836,7 @@ export function PdfEditorTool() {
                       ? "bg-blue-600 text-white shadow-sm"
                       : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100"
                   }`}
-                  title="Click on any existing text on the PDF to edit or replace it"
+                  title="Click on any existing text on the PDF to edit or replace it with auto-detected font matching"
                 >
                   <FileEdit className="h-3.5 w-3.5" />
                   <span>Edit Existing Text</span>
@@ -943,19 +1003,27 @@ export function PdfEditorTool() {
             <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center gap-4 text-xs">
               {mode === "editText" && (
                 <div className="flex flex-wrap items-center justify-between w-full gap-2">
-                  <div className="flex items-center space-x-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold text-blue-600 dark:text-blue-400 flex items-center space-x-1">
                       <Sparkles className="h-3.5 w-3.5" />
-                      <span>Click on any existing text element below to edit it in-place.</span>
+                      <span>Click any existing text below to edit it with matched font.</span>
                     </span>
+
+                    {dominantFont && (
+                      <span className="inline-flex items-center space-x-1 text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-[11px]">
+                        <span className="text-slate-400">Primary Font:</span>
+                        <strong className="text-blue-600 dark:text-blue-400">{dominantFont}</strong>
+                      </span>
+                    )}
+
                     {isExtractingText ? (
                       <span className="text-slate-400 flex items-center space-x-1 text-[11px]">
                         <Loader2 className="h-3 w-3 animate-spin" />
-                        <span>Detecting text elements...</span>
+                        <span>Detecting fonts & text...</span>
                       </span>
                     ) : (
                       <span className="text-slate-500 dark:text-slate-400 text-[11px]">
-                        ({extractedTexts.length} text elements detected on page {currentPage})
+                        ({extractedTexts.length} elements detected on page {currentPage})
                       </span>
                     )}
                   </div>
@@ -1192,7 +1260,7 @@ export function PdfEditorTool() {
                                 key={item.id}
                                 type="button"
                                 onClick={() => handleStartEditText(item)}
-                                title={`Click to edit: "${item.text}"`}
+                                title={`Click to edit: "${item.text}" (${item.detectedFontName})`}
                                 style={{
                                   left: `${item.xPct * 100}%`,
                                   top: `${item.yPct * 100}%`,
@@ -1308,6 +1376,11 @@ export function PdfEditorTool() {
                               <span className="font-semibold text-blue-700 dark:text-blue-300">
                                 &rarr; &ldquo;{rep.newText}&rdquo;
                               </span>
+                              {rep.detectedFontName && (
+                                <span className="block text-[10px] text-slate-500 dark:text-slate-400">
+                                  {rep.detectedFontName}
+                                </span>
+                              )}
                             </div>
                           </div>
                           <div className="flex items-center space-x-1 shrink-0 ml-1">
@@ -1322,6 +1395,11 @@ export function PdfEditorTool() {
                                   widthPct: rep.widthPct,
                                   heightPct: rep.heightPct,
                                   fontSize: rep.fontSize,
+                                  fontFamily: rep.fontFamily || "helvetica",
+                                  isBold: rep.isBold || false,
+                                  isItalic: rep.isItalic || false,
+                                  detectedFontName: rep.detectedFontName || "Standard",
+                                  cssFontFamily: 'Helvetica, Arial, sans-serif',
                                 };
                                 handleStartEditText(found);
                               }}
@@ -1425,7 +1503,7 @@ export function PdfEditorTool() {
             </div>
           </div>
 
-          {/* Interactive Modal for Editing Existing PDF Text */}
+          {/* Interactive Modal for Editing Existing PDF Text with Font Matching */}
           {activeEditingText && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 max-w-lg w-full space-y-4">
@@ -1446,6 +1524,20 @@ export function PdfEditorTool() {
                 </div>
 
                 <div className="space-y-3">
+                  {/* Detected Font Badge */}
+                  <div className="flex items-center justify-between p-2.5 rounded-lg bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 text-xs">
+                    <div className="flex items-center space-x-1.5 text-blue-800 dark:text-blue-300">
+                      <Sparkles className="h-4 w-4 text-blue-600 shrink-0" />
+                      <span className="font-medium">Detected Font:</span>
+                      <span className="font-semibold underline underline-offset-2">
+                        {editTextDetectedFontName}
+                      </span>
+                    </div>
+                    <span className="text-[10px] bg-blue-200/80 dark:bg-blue-800/80 text-blue-900 dark:text-blue-100 font-bold px-1.5 py-0.5 rounded">
+                      Auto-Matched
+                    </span>
+                  </div>
+
                   <div>
                     <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider block mb-1">
                       Original Text on PDF
@@ -1464,11 +1556,75 @@ export function PdfEditorTool() {
                       onChange={(e) => setEditTextValue(e.target.value)}
                       rows={3}
                       autoFocus
-                      className="w-full px-3 py-2 text-sm border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 font-sans"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                       placeholder="Enter updated text..."
+                      style={{
+                        fontFamily:
+                          editTextFontFamily === "times"
+                            ? '"Times New Roman", Times, Georgia, serif'
+                            : editTextFontFamily === "courier"
+                            ? '"Courier New", Courier, monospace'
+                            : 'Helvetica, Arial, sans-serif',
+                        fontWeight: editTextIsBold ? "bold" : "normal",
+                        fontStyle: editTextIsItalic ? "italic" : "normal",
+                      }}
                     />
                   </div>
 
+                  {/* Font Controls: Family, Bold, Italic */}
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 dark:text-slate-400 block mb-1">
+                        Font Family
+                      </label>
+                      <select
+                        value={editTextFontFamily}
+                        onChange={(e) => setEditTextFontFamily(e.target.value as PdfFontFamily)}
+                        className="w-full px-2.5 py-1.5 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+                      >
+                        <option value="helvetica">Helvetica / Arial (Sans-serif)</option>
+                        <option value="times">Times New Roman (Serif)</option>
+                        <option value="courier">Courier (Monospace)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 dark:text-slate-400 block mb-1">
+                        Font Style & Weight
+                      </label>
+                      <div className="flex items-center space-x-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setEditTextIsBold((b) => !b)}
+                          className={`flex items-center justify-center h-8 px-3 rounded-lg border text-xs font-bold transition-all ${
+                            editTextIsBold
+                              ? "bg-blue-600 text-white border-blue-600"
+                              : "border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                          }`}
+                          title="Toggle Bold"
+                        >
+                          <Bold className="h-3.5 w-3.5 mr-1" />
+                          <span>Bold</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setEditTextIsItalic((i) => !i)}
+                          className={`flex items-center justify-center h-8 px-3 rounded-lg border text-xs font-serif italic transition-all ${
+                            editTextIsItalic
+                              ? "bg-blue-600 text-white border-blue-600"
+                              : "border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                          }`}
+                          title="Toggle Italic"
+                        >
+                          <Italic className="h-3.5 w-3.5 mr-1" />
+                          <span>Italic</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Sizing & Colors */}
                   <div className="grid grid-cols-2 gap-3 pt-1">
                     <div>
                       <label className="text-xs font-medium text-slate-600 dark:text-slate-400 block mb-1">
@@ -1494,7 +1650,7 @@ export function PdfEditorTool() {
                             key={c.value}
                             type="button"
                             onClick={() => setEditTextColor(c.value)}
-                            className={`w-5 h-5 rounded-full border ${
+                            className={`w-6 h-6 rounded-full border ${
                               editTextColor === c.value
                                 ? "ring-2 ring-offset-1 ring-blue-500 scale-110"
                                 : "border-slate-300 dark:border-slate-600"

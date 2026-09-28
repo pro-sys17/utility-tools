@@ -260,6 +260,31 @@ export interface RectangleAnnotation {
   opacity: number;
 }
 
+export type PdfFontFamily = "helvetica" | "times" | "courier";
+
+export function resolveStandardFont(
+  family?: PdfFontFamily,
+  isBold?: boolean,
+  isItalic?: boolean
+): StandardFonts {
+  if (family === "times") {
+    if (isBold && isItalic) return StandardFonts.TimesRomanBoldItalic;
+    if (isBold) return StandardFonts.TimesRomanBold;
+    if (isItalic) return StandardFonts.TimesRomanItalic;
+    return StandardFonts.TimesRoman;
+  }
+  if (family === "courier") {
+    if (isBold && isItalic) return StandardFonts.CourierBoldOblique;
+    if (isBold) return StandardFonts.CourierBold;
+    if (isItalic) return StandardFonts.CourierOblique;
+    return StandardFonts.Courier;
+  }
+  if (isBold && isItalic) return StandardFonts.HelveticaBoldOblique;
+  if (isBold) return StandardFonts.HelveticaBold;
+  if (isItalic) return StandardFonts.HelveticaOblique;
+  return StandardFonts.Helvetica;
+}
+
 export interface TextReplacement {
   id: string;
   originalText: string;
@@ -271,6 +296,10 @@ export interface TextReplacement {
   fontSize: number;
   color: string;
   backgroundColor: string;
+  fontFamily?: PdfFontFamily;
+  isBold?: boolean;
+  isItalic?: boolean;
+  detectedFontName?: string;
 }
 
 export interface PageEditState {
@@ -309,7 +338,18 @@ export async function applyPdfEdits(
 ): Promise<Uint8Array> {
   const doc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
   const totalPages = doc.getPageCount();
-  const font = await doc.embedFont(StandardFonts.Helvetica);
+
+  // Dynamic font embedding cache
+  type EmbeddedFontType = Awaited<ReturnType<typeof doc.embedFont>>;
+  const fontCache = new Map<StandardFonts, EmbeddedFontType>();
+  const getFont = async (standardFont: StandardFonts): Promise<EmbeddedFontType> => {
+    let f = fontCache.get(standardFont);
+    if (!f) {
+      f = await doc.embedFont(standardFont);
+      fontCache.set(standardFont, f);
+    }
+    return f;
+  };
 
   const deletedIndices: number[] = [];
 
@@ -331,7 +371,7 @@ export async function applyPdfEdits(
       page.setRotation(degrees((currentRot + edit.rotationOffset) % 360));
     }
 
-    // 2. Text Replacements (Whiteout original & render replacement)
+    // 2. Text Replacements (Whiteout original & render replacement with matched font)
     if (edit.replacements) {
       for (const rep of edit.replacements) {
         if (!rep.newText && !rep.originalText) continue;
@@ -352,15 +392,18 @@ export async function applyPdfEdits(
           opacity: 1.0,
         });
 
-        // Draw new replacement text
+        // Draw new replacement text using the matched font
         if (rep.newText.trim()) {
           const fg = parseHexColor(rep.color || "#000000");
           const textY = pageHeight - (rep.yPct * pageHeight) - rep.fontSize;
+          const targetFontEnum = resolveStandardFont(rep.fontFamily, rep.isBold, rep.isItalic);
+          const matchedFont = await getFont(targetFontEnum);
+
           page.drawText(rep.newText, {
             x: Math.max(0, x),
             y: Math.max(0, textY),
             size: rep.fontSize,
-            font,
+            font: matchedFont,
             color: rgb(fg.r, fg.g, fg.b),
           });
         }
@@ -409,6 +452,7 @@ export async function applyPdfEdits(
     }
 
     // 4. Texts
+    const defaultFont = await getFont(StandardFonts.Helvetica);
     for (const textItem of edit.texts) {
       if (!textItem.text.trim()) continue;
       const c = parseHexColor(textItem.color);
@@ -419,7 +463,7 @@ export async function applyPdfEdits(
         x: Math.max(0, x),
         y: Math.max(0, y),
         size: textItem.fontSize,
-        font,
+        font: defaultFont,
         color: rgb(c.r, c.g, c.b),
       });
     }

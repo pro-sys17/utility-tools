@@ -7,6 +7,11 @@ export interface ExtractedTextItem {
   heightPct: number;
   fontSize: number;
   fontName?: string;
+  fontFamily: "helvetica" | "times" | "courier";
+  isBold: boolean;
+  isItalic: boolean;
+  detectedFontName: string;
+  cssFontFamily: string;
 }
 
 export interface PdfPageProxy {
@@ -20,6 +25,7 @@ export interface PdfPageProxy {
       height?: number;
       fontName?: string;
     }>;
+    styles?: Record<string, { fontFamily?: string; ascent?: number; descent?: number }>;
   }>;
 }
 
@@ -115,6 +121,101 @@ export async function convertPdfPageToImage(
 }
 
 /**
+ * Classify a font name and CSS font style into standard font family (Helvetica, Times, Courier),
+ * bold/italic attributes, and human-readable detected font description.
+ */
+export function detectFontProperties(
+  fontName?: string,
+  styleObject?: { fontFamily?: string }
+): {
+  family: "helvetica" | "times" | "courier";
+  isBold: boolean;
+  isItalic: boolean;
+  detectedName: string;
+  cssFontFamily: string;
+} {
+  const combined = `${fontName || ""} ${styleObject?.fontFamily || ""}`.toLowerCase();
+
+  const isBold =
+    combined.includes("bold") ||
+    combined.includes("black") ||
+    combined.includes("heavy") ||
+    combined.includes("bolder") ||
+    combined.includes("semibold") ||
+    combined.includes("w700") ||
+    combined.includes("w800") ||
+    combined.includes("w900");
+
+  const isItalic =
+    combined.includes("italic") ||
+    combined.includes("oblique") ||
+    combined.includes("slanted");
+
+  const isSans =
+    combined.includes("sans") ||
+    combined.includes("arial") ||
+    combined.includes("helvetica") ||
+    combined.includes("calibri") ||
+    combined.includes("roboto") ||
+    combined.includes("verdana") ||
+    combined.includes("tahoma") ||
+    combined.includes("trebuchet") ||
+    combined.includes("inter") ||
+    combined.includes("gothic");
+
+  const isSerif =
+    !isSans &&
+    (combined.includes("times") ||
+      combined.includes("serif") ||
+      combined.includes("georgia") ||
+      combined.includes("garamond") ||
+      combined.includes("palatino") ||
+      combined.includes("cambria") ||
+      combined.includes("roman") ||
+      combined.includes("baskerville") ||
+      combined.includes("minion"));
+
+  const isMonospace =
+    combined.includes("courier") ||
+    combined.includes("mono") ||
+    combined.includes("consolas") ||
+    combined.includes("monaco") ||
+    combined.includes("menlo") ||
+    combined.includes("typewriter");
+
+  const styleLabel =
+    isBold && isItalic ? "Bold Italic" : isBold ? "Bold" : isItalic ? "Italic" : "Regular";
+
+  if (isMonospace) {
+    return {
+      family: "courier",
+      isBold,
+      isItalic,
+      detectedName: `Courier / Monospace (${styleLabel})`,
+      cssFontFamily: '"Courier New", Courier, monospace',
+    };
+  }
+
+  if (isSerif) {
+    return {
+      family: "times",
+      isBold,
+      isItalic,
+      detectedName: `Times New Roman / Serif (${styleLabel})`,
+      cssFontFamily: '"Times New Roman", Times, Georgia, serif',
+    };
+  }
+
+  return {
+    family: "helvetica",
+    isBold,
+    isItalic,
+    detectedName: `Helvetica / Sans-serif (${styleLabel})`,
+    cssFontFamily: 'Helvetica, Arial, -apple-system, sans-serif',
+  };
+}
+
+/**
  * Extract all text items from a PDF page with normalized relative coordinates (0-1),
  * line-grouping, and font metrics to allow interactive in-place text editing.
  */
@@ -125,6 +226,7 @@ export async function extractPageTextItems(
   const page = await pdfDoc.getPage(pageNumber);
   const viewport = page.getViewport({ scale: 1.0 });
   const textContent = await page.getTextContent();
+  const styles = textContent.styles || {};
 
   const pageWidth = viewport.width;
   const pageHeight = viewport.height;
@@ -137,6 +239,7 @@ export async function extractPageTextItems(
     height: number;
     fontSize: number;
     fontName?: string;
+    style?: { fontFamily?: string };
   }
 
   const rawItems: RawItem[] = [];
@@ -152,6 +255,7 @@ export async function extractPageTextItems(
     );
     const width = item.width || fontSize * item.str.length * 0.6;
     const height = item.height || fontSize;
+    const itemStyle = item.fontName ? styles[item.fontName] : undefined;
 
     rawItems.push({
       str: item.str,
@@ -161,6 +265,7 @@ export async function extractPageTextItems(
       height,
       fontSize,
       fontName: item.fontName,
+      style: itemStyle,
     });
   }
 
@@ -195,6 +300,7 @@ export async function extractPageTextItems(
   return grouped.map((item, idx) => {
     const top = pageHeight - item.ty - item.fontSize;
     const left = item.tx;
+    const fontProp = detectFontProperties(item.fontName, item.style);
 
     return {
       id: `text_${pageNumber}_${idx}`,
@@ -205,6 +311,11 @@ export async function extractPageTextItems(
       heightPct: Math.max(0.01, Math.min(1, (item.fontSize * 1.3) / pageHeight)),
       fontSize: item.fontSize,
       fontName: item.fontName,
+      fontFamily: fontProp.family,
+      isBold: fontProp.isBold,
+      isItalic: fontProp.isItalic,
+      detectedFontName: fontProp.detectedName,
+      cssFontFamily: fontProp.cssFontFamily,
     };
   });
 }

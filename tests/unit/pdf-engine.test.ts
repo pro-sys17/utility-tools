@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { parsePageRanges, parseHexColor, applyPdfEdits, PageEditState } from "../../src/lib/pdf/pdf-engine";
-import { PDFDocument } from "pdf-lib";
+import {
+  parsePageRanges,
+  parseHexColor,
+  applyPdfEdits,
+  PageEditState,
+  resolveStandardFont,
+} from "../../src/lib/pdf/pdf-engine";
+import { detectFontProperties } from "../../src/lib/pdf/pdf-render";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 
 describe("pdf-engine", () => {
   describe("parsePageRanges", () => {
@@ -22,6 +29,51 @@ describe("pdf-engine", () => {
 
     it("returns all pages if input is empty", () => {
       expect(parsePageRanges("", 4)).toEqual([1, 2, 3, 4]);
+    });
+  });
+
+  describe("resolveStandardFont", () => {
+    it("correctly maps font family and styles to StandardFonts", () => {
+      expect(resolveStandardFont("times", false, false)).toBe(StandardFonts.TimesRoman);
+      expect(resolveStandardFont("times", true, false)).toBe(StandardFonts.TimesRomanBold);
+      expect(resolveStandardFont("times", false, true)).toBe(StandardFonts.TimesRomanItalic);
+      expect(resolveStandardFont("times", true, true)).toBe(StandardFonts.TimesRomanBoldItalic);
+
+      expect(resolveStandardFont("courier", false, false)).toBe(StandardFonts.Courier);
+      expect(resolveStandardFont("courier", true, false)).toBe(StandardFonts.CourierBold);
+      expect(resolveStandardFont("courier", false, true)).toBe(StandardFonts.CourierOblique);
+      expect(resolveStandardFont("courier", true, true)).toBe(StandardFonts.CourierBoldOblique);
+
+      expect(resolveStandardFont("helvetica", false, false)).toBe(StandardFonts.Helvetica);
+      expect(resolveStandardFont("helvetica", true, false)).toBe(StandardFonts.HelveticaBold);
+      expect(resolveStandardFont("helvetica", false, true)).toBe(StandardFonts.HelveticaOblique);
+      expect(resolveStandardFont("helvetica", true, true)).toBe(StandardFonts.HelveticaBoldOblique);
+    });
+  });
+
+  describe("detectFontProperties", () => {
+    it("detects Serif / Times New Roman fonts with styles", () => {
+      const res = detectFontProperties("TimesNewRomanPS-BoldItalicMT");
+      expect(res.family).toBe("times");
+      expect(res.isBold).toBe(true);
+      expect(res.isItalic).toBe(true);
+      expect(res.detectedName).toContain("Times New Roman / Serif");
+    });
+
+    it("detects Monospace / Courier fonts", () => {
+      const res = detectFontProperties("Courier-Bold");
+      expect(res.family).toBe("courier");
+      expect(res.isBold).toBe(true);
+      expect(res.isItalic).toBe(false);
+      expect(res.detectedName).toContain("Courier / Monospace");
+    });
+
+    it("defaults to Sans-serif / Helvetica for standard modern fonts", () => {
+      const res = detectFontProperties("ArialMT", { fontFamily: "sans-serif" });
+      expect(res.family).toBe("helvetica");
+      expect(res.isBold).toBe(false);
+      expect(res.isItalic).toBe(false);
+      expect(res.detectedName).toContain("Helvetica / Sans-serif");
     });
   });
 
