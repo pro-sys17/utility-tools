@@ -333,10 +333,14 @@ export function parseHexColor(hex: string): { r: number; g: number; b: number } 
  * highlights/redactions, page rotations, and page removals.
  */
 export async function applyPdfEdits(
-  pdfBuffer: ArrayBuffer,
+  pdfBuffer: ArrayBuffer | Uint8Array,
   edits: Record<number, PageEditState>
 ): Promise<Uint8Array> {
-  const doc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
+  const safeBytes =
+    pdfBuffer instanceof Uint8Array
+      ? pdfBuffer.slice()
+      : new Uint8Array(pdfBuffer.slice(0));
+  const doc = await PDFDocument.load(safeBytes, { ignoreEncryption: true });
   const totalPages = doc.getPageCount();
 
   // Dynamic font embedding cache

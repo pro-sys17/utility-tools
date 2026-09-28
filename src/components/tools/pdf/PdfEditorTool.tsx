@@ -68,7 +68,6 @@ const HIGHLIGHT_COLORS = [
 
 export function PdfEditorTool() {
   const [file, setFile] = React.useState<File | null>(null);
-  const [fileBuffer, setFileBuffer] = React.useState<ArrayBuffer | null>(null);
   const [pdfDoc, setPdfDoc] = React.useState<PdfDocumentProxy | null>(null);
   const [totalPages, setTotalPages] = React.useState(0);
   const [currentPage, setCurrentPage] = React.useState(1);
@@ -162,7 +161,6 @@ export function PdfEditorTool() {
       const loadedDoc = await loadPdfDocument(buffer);
 
       setFile(selectedFile);
-      setFileBuffer(buffer);
       setPdfDoc(loadedDoc);
       setTotalPages(meta.pageCount);
       setCurrentPage(1);
@@ -694,12 +692,14 @@ export function PdfEditorTool() {
 
   // 12. Export & Download Modified PDF
   const handleExport = async () => {
-    if (!fileBuffer || !file) return;
+    if (!file) return;
     setIsExporting(true);
     setError(null);
 
     try {
-      const modifiedBytes = await applyPdfEdits(fileBuffer, edits);
+      // Obtain a guaranteed fresh non-detached ArrayBuffer directly from the File object
+      const freshBuffer = await file.arrayBuffer();
+      const modifiedBytes = await applyPdfEdits(freshBuffer, edits);
       const baseName = file.name.replace(/\.pdf$/i, "");
       const outputBlob = new Blob([modifiedBytes as BlobPart], { type: "application/pdf" });
       downloadBlob(outputBlob, `${baseName}-edited.pdf`);
@@ -715,7 +715,6 @@ export function PdfEditorTool() {
   // Reset tool
   const handleReset = () => {
     setFile(null);
-    setFileBuffer(null);
     setPdfDoc(null);
     setTotalPages(0);
     setCurrentPage(1);

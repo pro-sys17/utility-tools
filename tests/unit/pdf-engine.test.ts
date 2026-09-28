@@ -200,6 +200,10 @@ describe("pdf-engine", () => {
       const editedBytes = await applyPdfEdits(initialBytes.buffer as ArrayBuffer, edits);
       expect(editedBytes.length).toBeGreaterThan(0);
 
+      // Verify it also accepts Uint8Array directly
+      const editedFromUint8 = await applyPdfEdits(initialBytes, edits);
+      expect(editedFromUint8.length).toBeGreaterThan(0);
+
       const modifiedDoc = await PDFDocument.load(editedBytes);
       expect(modifiedDoc.getPageCount()).toBe(1);
     });

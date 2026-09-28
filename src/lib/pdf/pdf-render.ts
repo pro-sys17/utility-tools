@@ -65,7 +65,10 @@ export interface RenderPageOptions {
 
 export async function loadPdfDocument(data: ArrayBuffer | Uint8Array): Promise<PdfDocumentProxy> {
   const pdfjs = await getPdfjs();
-  const loadingTask = pdfjs.getDocument({ data });
+  // Pass a cloned byte copy so the caller's original ArrayBuffer is never transferred or detached
+  const clonedData =
+    data instanceof Uint8Array ? data.slice() : new Uint8Array(data.slice(0));
+  const loadingTask = pdfjs.getDocument({ data: clonedData });
   return await loadingTask.promise;
 }
 
