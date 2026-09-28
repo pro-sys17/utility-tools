@@ -18,6 +18,7 @@ import {
   loadPdfDocument,
   renderPdfPageToCanvas,
   extractPageTextItems,
+  sampleColorsFromCanvas,
   ExtractedTextItem,
   PdfDocumentProxy,
 } from "@/lib/pdf/pdf-render";
@@ -103,6 +104,8 @@ export function PdfEditorTool() {
   const [editTextIsBold, setEditTextIsBold] = React.useState(false);
   const [editTextIsItalic, setEditTextIsItalic] = React.useState(false);
   const [editTextDetectedFontName, setEditTextDetectedFontName] = React.useState("");
+  const [detectedSampledTextColor, setDetectedSampledTextColor] = React.useState<string | null>(null);
+  const [detectedSampledBgColor, setDetectedSampledBgColor] = React.useState<string | null>(null);
 
   // Canvas refs
   const baseCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -188,7 +191,25 @@ export function PdfEditorTool() {
       })
       .then((items) => {
         if (isMounted && items) {
-          setExtractedTexts(items);
+          if (baseCanvasRef.current) {
+            const enriched = items.map((item) => {
+              const sampled = sampleColorsFromCanvas(
+                baseCanvasRef.current!,
+                item.xPct,
+                item.yPct,
+                item.widthPct,
+                item.heightPct
+              );
+              return {
+                ...item,
+                textColor: sampled.textColor,
+                backgroundColor: sampled.backgroundColor,
+              };
+            });
+            setExtractedTexts(enriched);
+          } else {
+            setExtractedTexts(items);
+          }
           setIsExtractingText(false);
         }
       })
@@ -357,6 +378,29 @@ export function PdfEditorTool() {
           overlayCanvas.height = dims.height;
           redrawOverlay();
         }
+
+        // Enrich extracted texts with exact sampled colors from rendered canvas
+        setExtractedTexts((prev) => {
+          if (!prev.length) return prev;
+          let changed = false;
+          const updated = prev.map((item) => {
+            if (item.textColor && item.backgroundColor) return item;
+            changed = true;
+            const sampled = sampleColorsFromCanvas(
+              baseCanvas,
+              item.xPct,
+              item.yPct,
+              item.widthPct,
+              item.heightPct
+            );
+            return {
+              ...item,
+              textColor: sampled.textColor,
+              backgroundColor: sampled.backgroundColor,
+            };
+          });
+          return changed ? updated : prev;
+        });
       } catch (err) {
         console.error("Failed to render page to canvas:", err);
       }
@@ -520,13 +564,34 @@ export function PdfEditorTool() {
         (Math.abs(r.xPct - item.xPct) < 0.01 && Math.abs(r.yPct - item.yPct) < 0.01)
     );
 
+    // Automatically sample existing text color and underlying page background color from the rendered base canvas
+    let sampledTextColor = item.textColor || "#000000";
+    let sampledBgColor = item.backgroundColor || "#ffffff";
+
+    if (baseCanvasRef.current) {
+      const sampled = sampleColorsFromCanvas(
+        baseCanvasRef.current,
+        item.xPct,
+        item.yPct,
+        item.widthPct,
+        item.heightPct
+      );
+      sampledTextColor = sampled.textColor;
+      sampledBgColor = sampled.backgroundColor;
+    }
+
+    setDetectedSampledTextColor(sampledTextColor);
+    setDetectedSampledBgColor(sampledBgColor);
+
     setActiveEditingText(item);
     setEditTextValue(existingReplacement ? existingReplacement.newText : item.text);
-    setEditTextColor(existingReplacement ? existingReplacement.color : "#000000");
+    // Automatically match the detected color of the existing text
+    setEditTextColor(existingReplacement ? existingReplacement.color : sampledTextColor);
     setEditTextFontSize(
       existingReplacement ? existingReplacement.fontSize : Math.max(10, item.fontSize)
     );
-    setEditTextBgColor(existingReplacement ? existingReplacement.backgroundColor : "#ffffff");
+    // Automatically match the page background tint to conceal seamlessly
+    setEditTextBgColor(existingReplacement ? existingReplacement.backgroundColor : sampledBgColor);
     setEditTextFontFamily(existingReplacement?.fontFamily || item.fontFamily || "helvetica");
     setEditTextIsBold(
       existingReplacement !== undefined ? Boolean(existingReplacement.isBold) : item.isBold
@@ -1259,7 +1324,7 @@ export function PdfEditorTool() {
                                 key={item.id}
                                 type="button"
                                 onClick={() => handleStartEditText(item)}
-                                title={`Click to edit: "${item.text}" (${item.detectedFontName})`}
+                                title={`Click to edit: "${item.text}" (${item.detectedFontName}${item.textColor ? ` • Color: ${item.textColor}` : ""})`}
                                 style={{
                                   left: `${item.xPct * 100}%`,
                                   top: `${item.yPct * 100}%`,
@@ -1272,11 +1337,17 @@ export function PdfEditorTool() {
                                     : "border border-blue-400/40 hover:border-blue-600 hover:bg-blue-500/15"
                                 } rounded cursor-pointer`}
                               >
-                                {isReplaced && (
+                                {isReplaced ? (
                                   <span className="absolute -top-3.5 right-0 text-[9px] bg-emerald-600 text-white font-bold px-1 rounded shadow-xs">
                                     Edited
                                   </span>
-                                )}
+                                ) : item.textColor ? (
+                                  <span
+                                    className="absolute -top-2 -right-1 w-2.5 h-2.5 rounded-full border border-white shadow-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                                    style={{ backgroundColor: item.textColor }}
+                                    title={`Detected color: ${item.textColor}`}
+                                  />
+                                ) : null}
                               </button>
                             );
                           })}
@@ -1375,11 +1446,18 @@ export function PdfEditorTool() {
                               <span className="font-semibold text-blue-700 dark:text-blue-300">
                                 &rarr; &ldquo;{rep.newText}&rdquo;
                               </span>
-                              {rep.detectedFontName && (
-                                <span className="block text-[10px] text-slate-500 dark:text-slate-400">
-                                  {rep.detectedFontName}
-                                </span>
-                              )}
+                              <div className="flex items-center space-x-1.5 mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
+                                {rep.detectedFontName && <span>{rep.detectedFontName}</span>}
+                                {rep.color && (
+                                  <span className="flex items-center space-x-1">
+                                    <span
+                                      className="w-2 h-2 rounded-full border border-slate-300 shrink-0 inline-block"
+                                      style={{ backgroundColor: rep.color }}
+                                    />
+                                    <span className="font-mono uppercase text-[9px]">{rep.color}</span>
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
                           <div className="flex items-center space-x-1 shrink-0 ml-1">
@@ -1399,6 +1477,8 @@ export function PdfEditorTool() {
                                   isItalic: rep.isItalic || false,
                                   detectedFontName: rep.detectedFontName || "Standard",
                                   cssFontFamily: 'Helvetica, Arial, sans-serif',
+                                  textColor: rep.color,
+                                  backgroundColor: rep.backgroundColor,
                                 };
                                 handleStartEditText(found);
                               }}
@@ -1523,18 +1603,55 @@ export function PdfEditorTool() {
                 </div>
 
                 <div className="space-y-3">
-                  {/* Detected Font Badge */}
-                  <div className="flex items-center justify-between p-2.5 rounded-lg bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 text-xs">
-                    <div className="flex items-center space-x-1.5 text-blue-800 dark:text-blue-300">
-                      <Sparkles className="h-4 w-4 text-blue-600 shrink-0" />
-                      <span className="font-medium">Detected Font:</span>
-                      <span className="font-semibold underline underline-offset-2">
-                        {editTextDetectedFontName}
+                  {/* Detected Font & Color Badges */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    <div className="flex items-center justify-between p-2 rounded-lg bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60">
+                      <div className="flex items-center space-x-1.5 truncate">
+                        <Sparkles className="h-3.5 w-3.5 text-blue-600 shrink-0" />
+                        <div className="truncate">
+                          <span className="text-[10px] uppercase font-bold text-blue-600 dark:text-blue-400 block leading-tight">
+                            Matched Font
+                          </span>
+                          <span className="font-semibold text-slate-800 dark:text-slate-200 truncate block">
+                            {editTextDetectedFontName}
+                          </span>
+                        </div>
+                      </div>
+                      <span className="text-[9px] bg-blue-200/80 dark:bg-blue-800/80 text-blue-900 dark:text-blue-100 font-bold px-1.5 py-0.5 rounded shrink-0 ml-1">
+                        Auto
                       </span>
                     </div>
-                    <span className="text-[10px] bg-blue-200/80 dark:bg-blue-800/80 text-blue-900 dark:text-blue-100 font-bold px-1.5 py-0.5 rounded">
-                      Auto-Matched
-                    </span>
+
+                    <div className="flex items-center justify-between p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60">
+                      <div className="flex items-center space-x-1.5 truncate">
+                        <span
+                          className="w-4 h-4 rounded-full border border-slate-300 dark:border-slate-600 shadow-xs shrink-0"
+                          style={{ backgroundColor: detectedSampledTextColor || editTextColor }}
+                          title={`Original text color: ${detectedSampledTextColor || editTextColor}`}
+                        />
+                        <div className="truncate">
+                          <span className="text-[10px] uppercase font-bold text-emerald-600 dark:text-emerald-400 block leading-tight">
+                            Matched Color
+                          </span>
+                          <span className="font-mono text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase">
+                            {detectedSampledTextColor || editTextColor}
+                          </span>
+                        </div>
+                      </div>
+                      {detectedSampledTextColor && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditTextColor(detectedSampledTextColor);
+                            if (detectedSampledBgColor) setEditTextBgColor(detectedSampledBgColor);
+                          }}
+                          className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-200/70 dark:bg-emerald-800/60 hover:bg-emerald-300 px-1.5 py-0.5 rounded transition-colors shrink-0 ml-1"
+                          title="Reset to detected original text and background colors"
+                        >
+                          Match Original
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <div>
@@ -1566,6 +1683,7 @@ export function PdfEditorTool() {
                             : 'Helvetica, Arial, sans-serif',
                         fontWeight: editTextIsBold ? "bold" : "normal",
                         fontStyle: editTextIsItalic ? "italic" : "normal",
+                        color: editTextColor,
                       }}
                     />
                   </div>
@@ -1624,7 +1742,7 @@ export function PdfEditorTool() {
                   </div>
 
                   {/* Sizing & Colors */}
-                  <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                     <div>
                       <label className="text-xs font-medium text-slate-600 dark:text-slate-400 block mb-1">
                         Font Size: {editTextFontSize}pt
@@ -1640,39 +1758,129 @@ export function PdfEditorTool() {
                     </div>
 
                     <div>
-                      <label className="text-xs font-medium text-slate-600 dark:text-slate-400 block mb-1">
-                        Text Color
-                      </label>
-                      <div className="flex items-center space-x-1.5">
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-xs font-medium text-slate-600 dark:text-slate-400">
+                          Text Color
+                        </label>
+                        {detectedSampledTextColor && editTextColor.toLowerCase() === detectedSampledTextColor.toLowerCase() && (
+                          <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold flex items-center">
+                            <Sparkles className="w-3 h-3 mr-0.5" />
+                            Original Matched
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center flex-wrap gap-1.5">
+                        {/* Sampled Original Color swatch button */}
+                        {detectedSampledTextColor && (
+                          <button
+                            type="button"
+                            onClick={() => setEditTextColor(detectedSampledTextColor)}
+                            className={`flex items-center space-x-1 px-1.5 py-0.5 rounded border text-[11px] font-mono transition-all ${
+                              editTextColor.toLowerCase() === detectedSampledTextColor.toLowerCase()
+                                ? "bg-emerald-50 dark:bg-emerald-950/60 border-emerald-500 text-emerald-700 dark:text-emerald-300 ring-2 ring-emerald-500/20 font-bold"
+                                : "border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"
+                            }`}
+                            title={`Original text color: ${detectedSampledTextColor}`}
+                          >
+                            <span
+                              className="w-3 h-3 rounded-full border border-slate-400 shrink-0"
+                              style={{ backgroundColor: detectedSampledTextColor }}
+                            />
+                            <span className="uppercase">{detectedSampledTextColor}</span>
+                          </button>
+                        )}
+
                         {PRESET_COLORS.map((c) => (
                           <button
                             key={c.value}
                             type="button"
                             onClick={() => setEditTextColor(c.value)}
-                            className={`w-6 h-6 rounded-full border ${
-                              editTextColor === c.value
+                            className={`w-6 h-6 rounded-full border transition-transform ${
+                              editTextColor.toLowerCase() === c.value.toLowerCase()
                                 ? "ring-2 ring-offset-1 ring-blue-500 scale-110"
-                                : "border-slate-300 dark:border-slate-600"
+                                : "border-slate-300 dark:border-slate-600 hover:scale-105"
                             }`}
                             style={{ backgroundColor: c.value }}
                             title={c.label}
                           />
                         ))}
+
+                        <input
+                          type="color"
+                          value={editTextColor}
+                          onChange={(e) => setEditTextColor(e.target.value)}
+                          className="w-6 h-6 rounded cursor-pointer border border-slate-300 dark:border-slate-600 p-0"
+                          title="Custom text color"
+                        />
                       </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between pt-1">
-                    <div className="flex items-center space-x-2 text-xs text-slate-500">
-                      <span>Conceal Background:</span>
+                  {/* Conceal Background Tint */}
+                  <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60 flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-medium text-slate-700 dark:text-slate-300 block">
+                        Conceal Background Tint
+                      </span>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                        Auto-sampled to match page tint behind original text
+                      </span>
+                    </div>
+                    <div className="flex items-center space-x-2 shrink-0">
+                      {detectedSampledBgColor && (
+                        <button
+                          type="button"
+                          onClick={() => setEditTextBgColor(detectedSampledBgColor)}
+                          className="text-[10px] text-blue-600 hover:underline"
+                          title="Reset background to detected page tint"
+                        >
+                          Reset
+                        </button>
+                      )}
                       <input
                         type="color"
                         value={editTextBgColor}
                         onChange={(e) => setEditTextBgColor(e.target.value)}
-                        className="w-6 h-6 rounded cursor-pointer border border-slate-300"
-                        title="Conceal background color (default #ffffff for white pages)"
+                        className="w-6 h-6 rounded cursor-pointer border border-slate-300 dark:border-slate-600 p-0"
+                        title="Conceal background color"
                       />
-                      <span className="text-[11px] font-mono">{editTextBgColor}</span>
+                      <span className="text-[11px] font-mono text-slate-600 dark:text-slate-300 uppercase">
+                        {editTextBgColor}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Live Canvas Preview */}
+                  <div className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-700/80 bg-slate-50/80 dark:bg-slate-800/40 space-y-1">
+                    <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                      <span>Live Canvas Preview</span>
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold flex items-center">
+                        <Sparkles className="w-3 h-3 mr-0.5" />
+                        Same Font &amp; Color
+                      </span>
+                    </div>
+                    <div
+                      className="p-2.5 rounded-lg border border-slate-200 dark:border-slate-700/80 transition-all shadow-inner overflow-x-auto min-h-[40px] flex items-center"
+                      style={{
+                        backgroundColor: editTextBgColor,
+                        color: editTextColor,
+                        fontFamily:
+                          editTextFontFamily === "times"
+                            ? '"Times New Roman", Times, Georgia, serif'
+                            : editTextFontFamily === "courier"
+                            ? '"Courier New", Courier, monospace'
+                            : 'Helvetica, Arial, sans-serif',
+                        fontWeight: editTextIsBold ? "bold" : "normal",
+                        fontStyle: editTextIsItalic ? "italic" : "normal",
+                        fontSize: `${Math.max(12, Math.min(24, editTextFontSize))}px`,
+                        lineHeight: 1.25,
+                      }}
+                    >
+                      {editTextValue ? (
+                        editTextValue
+                      ) : (
+                        <span className="opacity-30 italic text-xs">Preview of replacement text appears here...</span>
+                      )}
                     </div>
                   </div>
                 </div>

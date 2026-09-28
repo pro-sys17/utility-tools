@@ -7,7 +7,7 @@ import {
   resolveStandardFont,
   sanitizeTextForFont,
 } from "../../src/lib/pdf/pdf-engine";
-import { detectFontProperties } from "../../src/lib/pdf/pdf-render";
+import { detectFontProperties, sampleColorsFromCanvas } from "../../src/lib/pdf/pdf-render";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 
 describe("pdf-engine", () => {
@@ -261,6 +261,77 @@ describe("pdf-engine", () => {
       // This used to fail with: WinAnsi cannot encode "₹" (0x20b9)
       const result = await applyPdfEdits(bytes, edits);
       expect(result.length).toBeGreaterThan(0);
+    });
+
+    it("applies text replacements with custom text color and background tint during export", async () => {
+      const doc = await PDFDocument.create();
+      doc.addPage([500, 700]);
+      const bytes = await doc.save();
+
+      const edits: Record<number, PageEditState> = {
+        0: {
+          pageIndex: 0,
+          rotationOffset: 0,
+          isDeleted: false,
+          texts: [],
+          drawings: [],
+          rectangles: [],
+          replacements: [
+            {
+              id: "rep-custom-color",
+              originalText: "Original Headline",
+              newText: "Updated Premium Headline",
+              xPct: 0.1,
+              yPct: 0.15,
+              widthPct: 0.5,
+              heightPct: 0.05,
+              fontSize: 18,
+              color: "#1d4ed8", // Deep blue
+              backgroundColor: "#fef3c7", // Warm parchment tint
+              fontFamily: "times",
+              isBold: true,
+              isItalic: false,
+            },
+          ],
+        },
+      };
+
+      const result = await applyPdfEdits(bytes, edits);
+      expect(result.length).toBeGreaterThan(0);
+    });
+
+    it("sampleColorsFromCanvas extracts high-contrast stroke color and corner background color", () => {
+      const mockCanvas = {
+        width: 100,
+        height: 100,
+        getContext: () => ({
+          getImageData: (_x: number, _y: number, w: number, h: number) => {
+            const data = new Uint8ClampedArray(w * h * 4);
+            // Default background: white (255, 255, 255, 255)
+            for (let i = 0; i < w * h; i++) {
+              data[i * 4] = 255;
+              data[i * 4 + 1] = 255;
+              data[i * 4 + 2] = 255;
+              data[i * 4 + 3] = 255;
+            }
+            // Text glyph stroke in center: blue (29, 78, 216, 255)
+            for (let cy = Math.floor(h * 0.3); cy <= Math.floor(h * 0.7); cy++) {
+              for (let cx = Math.floor(w * 0.3); cx <= Math.floor(w * 0.7); cx++) {
+                const idx = (cy * w + cx) * 4;
+                data[idx] = 29;
+                data[idx + 1] = 78;
+                data[idx + 2] = 216;
+                data[idx + 3] = 255;
+              }
+            }
+            return { data, width: w, height: h };
+          },
+        }),
+      } as unknown as HTMLCanvasElement;
+
+      const sampled = sampleColorsFromCanvas(mockCanvas, 0.1, 0.1, 0.2, 0.1);
+      expect(sampled.backgroundColor.toLowerCase()).toBe("#ffffff");
+      expect(sampled.textColor.toLowerCase()).toBe("#1d4ed8");
     });
 
     it("throws an error when trying to delete all pages", async () => {

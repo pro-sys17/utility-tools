@@ -12,6 +12,8 @@ export interface ExtractedTextItem {
   isItalic: boolean;
   detectedFontName: string;
   cssFontFamily: string;
+  textColor?: string;
+  backgroundColor?: string;
 }
 
 export interface PdfPageProxy {
@@ -121,6 +123,137 @@ export async function convertPdfPageToImage(
       quality
     );
   });
+}
+
+/**
+ * Sample the exact text color and underlying page background color from the rendered PDF canvas
+ * at the given relative coordinates (0 to 1).
+ * Uses pixel contrast clustering against corner samples to accurately isolate the glyph stroke color.
+ */
+export function sampleColorsFromCanvas(
+  canvas: HTMLCanvasElement,
+  xPct: number,
+  yPct: number,
+  widthPct: number,
+  heightPct: number
+): { textColor: string; backgroundColor: string } {
+  try {
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) {
+      return { textColor: "#000000", backgroundColor: "#ffffff" };
+    }
+
+    const canvasW = canvas.width;
+    const canvasH = canvas.height;
+
+    // Convert percentages to pixel bounding box, with a 2px padding to sample background
+    const startX = Math.max(0, Math.floor(xPct * canvasW) - 2);
+    const startY = Math.max(0, Math.floor(yPct * canvasH) - 2);
+    const w = Math.min(canvasW - startX, Math.ceil(widthPct * canvasW) + 4);
+    const h = Math.min(canvasH - startY, Math.ceil(heightPct * canvasH) + 4);
+
+    if (w <= 0 || h <= 0) {
+      return { textColor: "#000000", backgroundColor: "#ffffff" };
+    }
+
+    const imgData = ctx.getImageData(startX, startY, w, h);
+    const data = imgData.data;
+
+    // Sample corner pixels to detect the background color
+    const cornerOffsets = [
+      0, // top-left
+      (w - 1) * 4, // top-right
+      ((h - 1) * w) * 4, // bottom-left
+      ((h - 1) * w + (w - 1)) * 4, // bottom-right
+    ];
+
+    let sumBgR = 0, sumBgG = 0, sumBgB = 0;
+    let countBg = 0;
+
+    for (const offset of cornerOffsets) {
+      if (offset >= 0 && offset + 3 < data.length) {
+        sumBgR += data[offset];
+        sumBgG += data[offset + 1];
+        sumBgB += data[offset + 2];
+        countBg++;
+      }
+    }
+
+    let bgR = 255, bgG = 255, bgB = 255;
+    if (countBg > 0) {
+      bgR = Math.round(sumBgR / countBg);
+      bgG = Math.round(sumBgG / countBg);
+      bgB = Math.round(sumBgB / countBg);
+    }
+
+    const bgHex = rgbToHex(bgR, bgG, bgB);
+
+    // Find pixels that contrast significantly with the sampled background (text stroke pixels)
+    interface ContrastingPixel {
+      r: number;
+      g: number;
+      b: number;
+      delta: number;
+    }
+
+    const contrastingPixels: ContrastingPixel[] = [];
+
+    for (let i = 0; i < data.length; i += 4) {
+      const a = data[i + 3];
+      if (a < 128) continue; // ignore transparent pixels
+
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      const delta = Math.sqrt(
+        Math.pow(r - bgR, 2) + Math.pow(g - bgG, 2) + Math.pow(b - bgB, 2)
+      );
+
+      // Distinct from background
+      if (delta > 35) {
+        contrastingPixels.push({ r, g, b, delta });
+      }
+    }
+
+    if (contrastingPixels.length === 0) {
+      // Default based on background brightness
+      const luma = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
+      return {
+        textColor: luma > 128 ? "#000000" : "#ffffff",
+        backgroundColor: bgHex,
+      };
+    }
+
+    // Sort by contrast delta (descending) to avoid anti-aliased edge blend
+    contrastingPixels.sort((a, b) => b.delta - a.delta);
+
+    // Take top 25% most contrasting core pixels
+    const sampleSize = Math.max(1, Math.floor(contrastingPixels.length * 0.25));
+    let textR = 0, textG = 0, textB = 0;
+    for (let i = 0; i < sampleSize; i++) {
+      textR += contrastingPixels[i].r;
+      textG += contrastingPixels[i].g;
+      textB += contrastingPixels[i].b;
+    }
+
+    textR = Math.round(textR / sampleSize);
+    textG = Math.round(textG / sampleSize);
+    textB = Math.round(textB / sampleSize);
+
+    return {
+      textColor: rgbToHex(textR, textG, textB),
+      backgroundColor: bgHex,
+    };
+  } catch (err) {
+    console.error("Color sampling error:", err);
+    return { textColor: "#000000", backgroundColor: "#ffffff" };
+  }
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const toHex = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
 /**
