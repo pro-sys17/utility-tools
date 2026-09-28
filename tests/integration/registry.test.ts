@@ -11,6 +11,7 @@ describe("Tool Registry Integration", () => {
   it("contains all 15 required first-phase active tools", () => {
     const requiredActiveSlugs = [
       "pdf-viewer",
+      "pdf-editor",
       "merge-pdf",
       "split-pdf",
       "pdf-compress",

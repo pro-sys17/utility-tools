@@ -1,4 +1,4 @@
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, rgb, degrees, StandardFonts } from "pdf-lib";
 
 export interface PdfSplitResult {
   filename: string;
@@ -233,3 +233,157 @@ export async function imagesToPdf(
 
   return await pdfDoc.save();
 }
+
+export interface TextAnnotation {
+  id: string;
+  text: string;
+  xPct: number;
+  yPct: number;
+  fontSize: number;
+  color: string;
+}
+
+export interface DrawingStroke {
+  id: string;
+  points: { xPct: number; yPct: number }[];
+  color: string;
+  width: number;
+}
+
+export interface RectangleAnnotation {
+  id: string;
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  heightPct: number;
+  color: string;
+  opacity: number;
+}
+
+export interface PageEditState {
+  pageIndex: number;
+  rotationOffset: number;
+  isDeleted: boolean;
+  texts: TextAnnotation[];
+  drawings: DrawingStroke[];
+  rectangles: RectangleAnnotation[];
+}
+
+export function parseHexColor(hex: string): { r: number; g: number; b: number } {
+  let clean = hex.replace("#", "");
+  if (clean.length === 3) {
+    clean = clean.split("").map((c) => c + c).join("");
+  }
+  const num = parseInt(clean, 16);
+  if (isNaN(num)) {
+    return { r: 0, g: 0, b: 0 };
+  }
+  return {
+    r: ((num >> 16) & 255) / 255,
+    g: ((num >> 8) & 255) / 255,
+    b: (num & 255) / 255,
+  };
+}
+
+/**
+ * Apply in-browser PDF modifications including text annotations, drawing strokes,
+ * highlights/redactions, page rotations, and page removals.
+ */
+export async function applyPdfEdits(
+  pdfBuffer: ArrayBuffer,
+  edits: Record<number, PageEditState>
+): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
+  const totalPages = doc.getPageCount();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+
+  const deletedIndices: number[] = [];
+
+  for (let i = 0; i < totalPages; i++) {
+    const edit = edits[i];
+    if (!edit) continue;
+
+    if (edit.isDeleted) {
+      deletedIndices.push(i);
+      continue;
+    }
+
+    const page = doc.getPage(i);
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+
+    // 1. Rotation
+    if (edit.rotationOffset && edit.rotationOffset % 360 !== 0) {
+      const currentRot = page.getRotation().angle;
+      page.setRotation(degrees((currentRot + edit.rotationOffset) % 360));
+    }
+
+    // 2. Rectangles / Highlights / Redactions
+    for (const rect of edit.rectangles) {
+      const c = parseHexColor(rect.color);
+      const x = rect.xPct * pageWidth;
+      const y = pageHeight - (rect.yPct * pageHeight) - (rect.heightPct * pageHeight);
+      const width = rect.widthPct * pageWidth;
+      const height = rect.heightPct * pageHeight;
+
+      page.drawRectangle({
+        x: Math.max(0, x),
+        y: Math.max(0, y),
+        width: Math.min(pageWidth, width),
+        height: Math.min(pageHeight, height),
+        color: rgb(c.r, c.g, c.b),
+        opacity: rect.opacity,
+      });
+    }
+
+    // 3. Freehand Drawings / Signatures
+    for (const stroke of edit.drawings) {
+      const c = parseHexColor(stroke.color);
+      if (stroke.points.length < 2) continue;
+
+      for (let p = 0; p < stroke.points.length - 1; p++) {
+        const p1 = stroke.points[p];
+        const p2 = stroke.points[p + 1];
+
+        const x1 = p1.xPct * pageWidth;
+        const y1 = pageHeight - (p1.yPct * pageHeight);
+        const x2 = p2.xPct * pageWidth;
+        const y2 = pageHeight - (p2.yPct * pageHeight);
+
+        page.drawLine({
+          start: { x: x1, y: y1 },
+          end: { x: x2, y: y2 },
+          thickness: stroke.width,
+          color: rgb(c.r, c.g, c.b),
+        });
+      }
+    }
+
+    // 4. Texts
+    for (const textItem of edit.texts) {
+      if (!textItem.text.trim()) continue;
+      const c = parseHexColor(textItem.color);
+      const x = textItem.xPct * pageWidth;
+      const y = pageHeight - (textItem.yPct * pageHeight) - textItem.fontSize;
+
+      page.drawText(textItem.text, {
+        x: Math.max(0, x),
+        y: Math.max(0, y),
+        size: textItem.fontSize,
+        font,
+        color: rgb(c.r, c.g, c.b),
+      });
+    }
+  }
+
+  // Remove deleted pages in descending order
+  if (deletedIndices.length >= totalPages) {
+    throw new Error("Cannot delete all pages in the PDF document.");
+  }
+
+  for (const idx of deletedIndices.sort((a, b) => b - a)) {
+    doc.removePage(idx);
+  }
+
+  return await doc.save();
+}
+

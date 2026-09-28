@@ -4,6 +4,7 @@ import * as React from "react";
 import { ToolDefinition } from "@/lib/registry/types";
 import { ToolShell } from "@/components/tool/ToolShell";
 import { PdfViewerTool } from "./pdf/PdfViewerTool";
+import { PdfEditorTool } from "./pdf/PdfEditorTool";
 import { MergePdfTool } from "./pdf/MergePdfTool";
 import { SplitPdfTool } from "./pdf/SplitPdfTool";
 import { PdfCompressTool } from "./pdf/PdfCompressTool";
@@ -29,6 +30,8 @@ export function ToolDispatcher({ tool }: ToolDispatcherProps) {
     switch (tool.slug) {
       case "pdf-viewer":
         return <PdfViewerTool />;
+      case "pdf-editor":
+        return <PdfEditorTool />;
       case "merge-pdf":
         return <MergePdfTool />;
       case "split-pdf":
